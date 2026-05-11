@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/agent-memory-protocol/amp/schema/amp.json",
+  "title": "Agent Memory Protocol (AMP) v0.1 — Tool Schemas",
+  "description": "JSON Schema definitions for all AMP tool inputs and outputs.",
+  "definitions": {
+    "MemoryResult": {
+      "type": "object",
+      "description": "Canonical memory object returned in recall responses.",
+      "required": ["id", "content", "score", "timestamp", "status"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Backend-assigned unique identifier."
+        },
+        "content": {
+          "type": "string",
+          "description": "Text content of the memory."
+        },
+        "score": {
+          "type": "number",
+          "description": "Relevance score for the query. 0.0–1.0 recommended; backend may use own scale."
+        },
+        "source": {
+          "type": "string",
+          "description": "Provenance label (e.g. user_stated, inferred, external)."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 creation time."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "pinned", "archived"],
+          "description": "Current lifecycle status of the memory."
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Backend-specific fields (e.g. salience scores, hop distance, room ID).",
+          "additionalProperties": true
+        }
+      }
+    },
+    "RecallFilters": {
+      "type": "object",
+      "description": "Optional filters for amp/recall.",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["active", "pinned", "archived"],
+          "description": "Filter by memory status. If absent, backends SHOULD return active and pinned memories."
+        },
+        "source": {
+          "type": "string",
+          "description": "Filter by provenance label."
+        },
+        "timestamp_after": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Return only memories created after this time."
+        },
+        "timestamp_before": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Return only memories created before this time."
+        }
+      },
+      "additionalProperties": false
+    },
+    "AmpErrorData": {
+      "type": "object",
+      "description": "AMP error payload placed in the JSON-RPC error data field.",
+      "required": ["amp_error_code", "message"],
+      "properties": {
+        "amp_error_code": {
+          "type": "string",
+          "enum": ["invalid_request", "not_found", "not_supported", "backend_error"],
+          "description": "AMP-specific error code."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error description."
+        }
+      }
+    }
+  },
+  "tools": {
+    "amp/encode": {
+      "description": "Store a new memory for an agent.",
+      "input": {
+        "type": "object",
+        "required": ["agent_id", "content"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Namespace identifier for the calling agent."
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Text content to store as a memory."
+          },
+          "source": {
+            "type": "string",
+            "description": "Provenance label (e.g. user_stated, inferred, external)."
+          },
+          "force": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, bypass salience threshold and store unconditionally."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Hints to the backend (e.g. salience scores, modality).",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "New memory identifier. Present when status is 'stored' or 'duplicate'."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["stored", "duplicate", "below_threshold"],
+            "description": "Outcome of the encode operation."
+          }
+        }
+      }
+    },
+    "amp/recall": {
+      "description": "Retrieve memories relevant to a query.",
+      "input": {
+        "type": "object",
+        "required": ["agent_id", "query"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Namespace identifier for the calling agent."
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Natural language or keyword query."
+          },
+          "top_k": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10,
+            "description": "Maximum number of results to return."
+          },
+          "filters": {
+            "$ref": "#/definitions/RecallFilters"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/MemoryResult"
+            },
+            "description": "Memories ordered by descending relevance score."
+          }
+        }
+      }
+    },
+    "amp/forget": {
+      "description": "Permanently delete a memory.",
+      "input": {
+        "type": "object",
+        "required": ["agent_id", "id"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Namespace identifier for the calling agent."
+          },
+          "id": {
+            "type": "string",
+            "description": "ID of the memory to delete."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["forgotten", "not_found"],
+            "description": "Outcome of the forget operation."
+          }
+        }
+      }
+    },
+    "amp/consolidate": {
+      "description": "Trigger backend consolidation. Full conformance only.",
+      "input": {
+        "type": "object",
+        "required": ["agent_id"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Namespace identifier for the calling agent."
+          },
+          "depth": {
+            "type": "string",
+            "enum": ["full", "light"],
+            "default": "full",
+            "description": "Consolidation depth. 'full' = complete pass; 'light' = minimal/incremental pass."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["queued", "ok", "not_supported"],
+            "description": "Outcome of the consolidate operation."
+          },
+          "memories_processed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of memories processed. Present when status is 'ok'."
+          }
+        }
+      }
+    },
+    "amp/pin": {
+      "description": "Mark a memory as permanent (never archived by consolidation). Full conformance only.",
+      "input": {
+        "type": "object",
+        "required": ["agent_id", "id"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Namespace identifier for the calling agent."
+          },
+          "id": {
+            "type": "string",
+            "description": "ID of the memory to pin."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pinned", "not_found"],
+            "description": "Outcome of the pin operation."
+          }
+        }
+      }
+    },
+    "amp/stats": {
+      "description": "Return backend statistics for an agent namespace.",
+      "input": {
+        "type": "object",
+        "required": ["agent_id"],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "description": "Namespace identifier for the calling agent."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["memory_count"],
+        "properties": {
+          "memory_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total number of active and pinned memories."
+          },
+          "unconsolidated_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of memories not yet consolidated. Optional for Core backends."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Backend-specific statistics (e.g. room count, vector store size, last consolidation time).",
+            "additionalProperties": true
+          }
+        }
+      }
+    }
+  }
+}
