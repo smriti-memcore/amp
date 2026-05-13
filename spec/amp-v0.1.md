@@ -102,6 +102,8 @@ A memory is a unit of persistent information stored on behalf of an agent. Every
 - A `score` — backend-assigned relevance score for the current query (present only in recall responses)
 - A `metadata` bag — open JSON object for backend-specific fields
 
+**ID uniqueness and namespace access:** Memory IDs are globally unique — no two memories across any namespace will share the same ID. However, access is enforced by namespace: if `agent-B` calls `amp/forget` or `amp/pin` with an ID that was created under `agent-A`'s namespace, the backend MUST return `not_found` (not an auth error). The ID is globally unique for backend deduplication purposes; the namespace determines what a given caller may see and modify.
+
 ### 4.2 Memory lifecycle
 
 ```
@@ -126,9 +128,13 @@ encode ──→ (below_threshold)    ← rejected; no memory created; no id ret
 
 Every AMP request carries an `agent_id` field. This allows a single backend to serve multiple agents with isolated memory namespaces. Backends MUST enforce namespace isolation: an `amp/recall` for `agent_id: "agent-A"` MUST NOT return memories encoded by `agent_id: "agent-B"` unless the backend explicitly implements a shared memory feature and the caller has opted in. Backends SHOULD create a new namespace implicitly on first `amp/encode` for an unknown `agent_id`; they MUST NOT return an error solely because the namespace is new.
 
+**What is `agent_id`?** AMP intentionally leaves this to the caller. `agent_id` is an opaque, caller-defined string used as a partitioning key — it is not derived from the underlying model, model version, or agent harness. Callers may set it to an application identifier (`"my-app"`), a user session (`"user-42-session"`), a logical agent role (`"research-assistant"`), or anything else meaningful to their system. Upgrading a model or switching harnesses does not automatically change `agent_id` — that is the caller's decision. This deliberate openness means AMP does not define identity semantics; it only enforces that whatever string the caller provides is treated as a consistent namespace. See Open Question #10 for further discussion.
+
 ### 4.4 Consolidation
 
-Consolidation is an optional background process by which the backend reorganises, deduplicates, or distils raw memories into higher-order knowledge. AMP exposes `amp/consolidate` as a trigger, but the backend decides what consolidation means internally. A minimal conformant backend may treat it as a no-op.
+Consolidation is an optional background process by which the backend reorganises, deduplicates, or distils raw memories into higher-order knowledge. AMP exposes `amp/consolidate` as a trigger, but the backend decides what consolidation means internally.
+
+**Full conformance and no-op implementations:** Full conformance requires `amp/consolidate` to be a callable, responsive endpoint — the tool must exist and return a valid AMP response. A Full-conformant backend MAY implement consolidation as a no-op (performing no internal reorganisation), in which case it MUST return `status: "ok"` with `memories_processed: 0`. We recommend that Full backends perform meaningful consolidation (deduplication, archival of superseded memories, or summarisation), but the spec does not mandate what that consolidation does internally. Core-conformant backends that have not implemented the endpoint at all MUST return `amp_error_code: not_supported` (see §5.8).
 
 ---
 
@@ -453,6 +459,7 @@ The following design questions are explicitly deferred from v0.1 and will be res
 7. **Pagination** — Should `amp/recall` support cursor-based pagination for backends with large memory stores, or is `top_k` sufficient?
 8. **Score semantics for exact-match backends** — What should a Core-conformant backend that uses exact-match retrieval return for the `score` field?
 9. **Update semantics** — Is the encode-then-forget pattern sufficient for updating a memory, or should AMP define an `amp/update` verb?
+10. **Agent identity semantics** — What should determine an `agent_id`? Should AMP provide conventions (e.g. recommend an application-scoped ID over a model-scoped ID) to avoid interoperability issues when the same logical agent is served by different models or harnesses over time? Alternatively, is the namespace partition itself necessary, or would a single global namespace with per-memory ownership metadata be a simpler design?
 
 ---
 
