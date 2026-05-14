@@ -471,7 +471,8 @@ The following design questions are explicitly deferred from v1.0 and will be res
 - [ ] Resolve open questions in Section 9
 - [ ] Publish spec to public GitHub repo
 - [ ] Submit to arXiv (cs.AI)
-- [ ] Reference implementation: update smriti-memcore to use AMP tool names as aliases
+- [x] Reference implementation: `amp-server` (Full-conformant, FastMCP + smriti-memcore, `pip install amp-server`) published to PyPI
+- [ ] Reference implementation: update smriti-memcore to expose AMP tool names (`amp.encode`, `amp.recall`, etc.) as aliases alongside existing tool names
 - [ ] Reach out to LangChain, LlamaIndex, and Anthropic SDK teams for feedback
 
 ---
