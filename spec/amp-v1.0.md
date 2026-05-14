@@ -471,7 +471,7 @@ The following design questions are explicitly deferred from v1.0 and will be res
 - [ ] Resolve open questions in Section 9
 - [ ] Publish spec to public GitHub repo
 - [ ] Submit to arXiv (cs.AI)
-- [x] Reference implementation: `amp-server` (Full-conformant, FastMCP + smriti-memcore, `pip install amp-server`) published to PyPI
+- [ ] Publish `amp-server` to PyPI (`pip install amp-server`); currently install from source via `pip install "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-server"`
 - [x] Reference implementation: smriti-memcore v1.2.0 exposes AMP tool names (`amp.encode`, `amp.recall`, etc.) as aliases alongside existing `smriti_*` tools; passes all 25 AMP compliance tests
 - [ ] Reach out to LangChain, LlamaIndex, and Anthropic SDK teams for feedback
 

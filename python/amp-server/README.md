@@ -5,7 +5,7 @@ AMP (Agent Memory Protocol) Full-conformant reference server, backed by [smriti-
 ## Install
 
 ```bash
-pip install amp-server
+pip install "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-server"
 ```
 
 ## Run

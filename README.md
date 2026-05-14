@@ -34,7 +34,7 @@ amp/
 ├── examples/               # Example implementations
 │   └── minimal_server.py   # Minimal Core-conformant MCP server
 └── python/                 # Python reference implementation
-    └── amp-server/         # smriti-memcore AMP wrapper (Full-conformant, pip install amp-server)
+    └── amp-server/         # smriti-memcore AMP wrapper (Full-conformant, install from source)
 ```
 
 ## Quick Start
@@ -47,7 +47,7 @@ python examples/minimal_server.py
 
 No external dependencies — pure Python stdlib. The server speaks the MCP wire protocol (JSON-RPC 2.0 over stdio) manually: it handles `initialize`, `tools/list`, and `tools/call` without using the `mcp` Python package. This is intentional — it shows that AMP is a protocol convention, not a library dependency.
 
-> **Note:** `examples/minimal_server.py` is a teaching tool, not a production server. For a production AMP backend, use the [`mcp` Python package](https://pypi.org/project/mcp/) (Anthropic's official SDK) to get full protocol compliance. See [`python/amp-server/`](python/amp-server/README.md) for the Full-conformant reference implementation (`pip install amp-server`).
+> **Note:** `examples/minimal_server.py` is a teaching tool, not a production server. For a production AMP backend, use the [`mcp` Python package](https://pypi.org/project/mcp/) (Anthropic's official SDK) to get full protocol compliance. See [`python/amp-server/`](python/amp-server/README.md) for the Full-conformant reference implementation.
 
 ### Running the compliance suite against your server
 
@@ -73,7 +73,7 @@ The compliance suite speaks raw MCP over stdio — it performs the full MCP hand
 
 ## Reference Implementation
 
-[`amp-server`](python/amp-server/README.md) is the reference Full-conformant AMP implementation (`pip install amp-server`). It wraps [smriti-memcore](https://pypi.org/project/smriti-memcore/) — providing hybrid FTS5+vector retrieval with RRF fusion, multi-hop Semantic Palace graph traversal, spaced-repetition decay, and background consolidation — and exposes all six AMP verbs over MCP stdio.
+[`amp-server`](python/amp-server/README.md) is the reference Full-conformant AMP implementation (install from source — see [`python/amp-server/`](python/amp-server/README.md)). It wraps [smriti-memcore](https://pypi.org/project/smriti-memcore/) — providing hybrid FTS5+vector retrieval with RRF fusion, multi-hop Semantic Palace graph traversal, spaced-repetition decay, and background consolidation — and exposes all six AMP verbs over MCP stdio.
 
 > **Note:** smriti-memcore v1.2.0+ exposes both its native `smriti_*` tools and the AMP verb aliases (`amp.encode`, `amp.recall`, etc.) on the same MCP server — no separate install needed.
 
