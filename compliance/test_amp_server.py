@@ -1,5 +1,5 @@
 """
-AMP Compliance Test Suite v0.1
+AMP Compliance Test Suite v1.0
 
 Tests any AMP-conformant server via MCP stdio transport.
 Run against your server with:
@@ -68,7 +68,7 @@ class MCPClient:
         self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "amp-compliance-tester", "version": "0.1"},
+            "clientInfo": {"name": "amp-compliance-tester", "version": "1.0"},
         })
 
     def call_tool(self, name: str, arguments: Dict) -> Dict:

@@ -211,9 +211,9 @@ def handle_request(req: Dict) -> Dict:
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "amp-minimal-example",
-                "version": "0.1",
+                "version": "1.0",
                 "amp_conformance": "core",
-                "amp_version": "0.1",
+                "amp_version": "1.0",
             },
         })
 

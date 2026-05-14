@@ -27,7 +27,7 @@ AMP is an open specification that defines a standard interface for persistent me
 
 ```
 amp/
-├── spec/amp-v0.1.md        # The specification
+├── spec/amp-v1.0.md        # The specification
 ├── schema/amp.json         # JSON Schema for all AMP tools
 ├── compliance/             # Compliance test suite (pytest)
 │   └── test_amp_server.py
@@ -63,7 +63,7 @@ pytest compliance/test_amp_server.py --server-cmd "python your_server.py"
    {
      "name": "my-memory-backend",
      "amp_conformance": "core",
-     "amp_version": "0.1"
+     "amp_version": "1.0"
    }
    ```
 3. Run the compliance suite to verify
@@ -76,13 +76,13 @@ The current smriti-memcore tool names (`smriti_encode`, `smriti_recall`, etc.) w
 
 ## Specification
 
-See [spec/amp-v0.1.md](spec/amp-v0.1.md) for the full specification.
+See [spec/amp-v1.0.md](spec/amp-v1.0.md) for the full specification.
 
 ## Status
 
 v1.0 — 2026-05-14. Ready for community implementation and feedback.
 
-Open questions and next steps are tracked in [spec/amp-v0.1.md § Open Questions](spec/amp-v0.1.md#9-open-questions).
+Open questions and next steps are tracked in [spec/amp-v1.0.md § Open Questions](spec/amp-v1.0.md#9-open-questions).
 
 ## License
 

@@ -1,6 +1,6 @@
-# Agent Memory Protocol (AMP) — Specification v0.1
+# Agent Memory Protocol (AMP) — Specification v1.0
 
-> **Status:** Draft v0.1 — 2026-05-10
+> **Status:** Draft v1.0 — 2026-05-10
 > **Authors:** \<TBA\>
 > **Target:** arXiv + public GitHub spec repo
 
@@ -448,7 +448,7 @@ smriti-memcore `metadata` in `MemoryResult` includes: `salience` (5-dimensional 
 
 ## 9. Open Questions
 
-The following design questions are explicitly deferred from v0.1 and will be resolved based on community feedback:
+The following design questions are explicitly deferred from v1.0 and will be resolved based on community feedback:
 
 1. **Multi-agent shared memory** — Should AMP define a mechanism for two agents to share a memory namespace, or is that out of scope for the base protocol?
 2. **Authentication** — Should AMP define a standard agent authentication header, or fully delegate to the MCP transport layer?

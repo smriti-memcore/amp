@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/agent-memory-protocol/amp/schema/amp.json",
-  "title": "Agent Memory Protocol (AMP) v0.1 — Tool Schemas",
+  "title": "Agent Memory Protocol (AMP) v1.0 — Tool Schemas",
   "description": "JSON Schema definitions for all AMP tool inputs and outputs.",
   "definitions": {
     "MemoryResult": {
