@@ -48,17 +48,21 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "amp": {
-      "command": "/absolute/path/to/amp-server",
-      "args": ["--storage-path", "/Users/you/.amp"]
+      "command": "uvx",
+      "args": [
+        "--from", "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-server",
+        "amp-server",
+        "--storage-path", "/Users/you/.amp"
+      ]
     }
   }
 }
 ```
 
-*Note: Claude Desktop does not inherit your shell's `PATH`. You must provide the absolute path to the `amp-server` executable (e.g., `~/.local/bin/amp-server` or `/path/to/venv/bin/amp-server`).*
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). `uvx` handles the Python environment automatically — Claude Desktop does not inherit your shell's `PATH`, so using `uvx` avoids needing to find the absolute path to the installed binary.
 
 ## Connect to Claude Code
 
 ```bash
-claude mcp add amp -- amp-server --storage-path ~/.amp
+claude mcp add amp -- uvx --from "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-server" amp-server --storage-path ~/.amp
 ```
