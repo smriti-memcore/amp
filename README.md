@@ -45,7 +45,9 @@ amp/
 python examples/minimal_server.py
 ```
 
-No dependencies — pure Python stdlib. This starts a Core-conformant AMP server over MCP stdio. Connect it to any MCP client.
+No external dependencies — pure Python stdlib. The server speaks the MCP wire protocol (JSON-RPC 2.0 over stdio) manually: it handles `initialize`, `tools/list`, and `tools/call` without using the `mcp` Python package. This is intentional — it shows that AMP is a protocol convention, not a library dependency.
+
+> **Note:** `examples/minimal_server.py` is a teaching tool, not a production server. For a production AMP backend, use the [`mcp` Python package](https://pypi.org/project/mcp/) (Anthropic's official SDK) to get full protocol compliance. See `python/amp-server/` for the production reference implementation (coming soon).
 
 ### Running the compliance suite against your server
 
@@ -54,9 +56,11 @@ pip install pytest
 pytest compliance/test_amp_server.py --server-cmd "python your_server.py"
 ```
 
+The compliance suite also speaks raw MCP over stdio — it launches your server as a subprocess and sends JSON-RPC messages directly, so it works against any AMP server regardless of which MCP SDK it uses internally.
+
 ### Implementing your own backend
 
-1. Implement the four Core verbs (`amp/encode`, `amp/recall`, `amp/forget`, `amp/stats`) as MCP tools
+1. Implement the four Core verbs (`amp/encode`, `amp/recall`, `amp/forget`, `amp/stats`) as MCP tools using any MCP SDK or the raw wire protocol
 2. Declare conformance in your MCP server manifest:
    ```json
    {
