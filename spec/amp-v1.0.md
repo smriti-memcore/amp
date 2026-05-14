@@ -1,8 +1,8 @@
 # Agent Memory Protocol (AMP) — Specification v1.0
+*By Community, Of Community, For Community*
 
 > **Status:** v1.0 — 2026-05-14
-> **Authors:** \<TBA\>
-> **Target:** arXiv + public GitHub spec repo
+> **Authors:** Shivam Tyagi, Brad Jones
 
 ---
 

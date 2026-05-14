@@ -1,4 +1,5 @@
 # Agent Memory Protocol (AMP)
+*By Community, Of Community, For Community*
 
 AMP is an open specification that defines a standard interface for persistent memory in AI agent systems. Built as a set of tool definitions on top of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), AMP enables any memory backend to serve any MCP-compatible agent through a common contract.
 
