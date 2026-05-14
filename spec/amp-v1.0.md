@@ -10,7 +10,7 @@
 
 Agent Memory Protocol (AMP) is an open specification that defines a standard interface for persistent memory in AI agent systems. Built as a set of tool definitions on top of the Model Context Protocol (MCP), AMP enables any memory backend to serve any MCP-compatible agent through a common contract. An agent developer targeting AMP can switch memory backends — from a simple key-value store to a graph-based episodic memory system — without changing application code. A memory backend implementing AMP can be consumed by any AMP-compatible agent framework without custom integration work.
 
-**Claim:** A six-verb interface — `amp/encode`, `amp/recall`, `amp/forget`, `amp/consolidate`, `amp/pin`, `amp/stats` — is necessary and sufficient to represent the complete memory lifecycle across backends of varying complexity. We validate this claim against four production memory systems and demonstrate it through a full reference implementation.
+**Claim:** A six-verb interface — `amp.encode`, `amp.recall`, `amp.forget`, `amp.consolidate`, `amp.pin`, `amp.stats` — is necessary and sufficient to represent the complete memory lifecycle across backends of varying complexity. We validate this claim against four production memory systems and demonstrate it through a full reference implementation.
 
 ---
 
@@ -24,7 +24,7 @@ Persistent memory is a prerequisite for agents that operate across sessions, col
 
 **Obsidian Vault** has no official MCP implementation. The community has produced 66+ MCP servers, of which eight have meaningful traction — each exposing different tool names, schemas, and capabilities, ranging from raw file read/write to BM25 keyword search to graph traversal. Several servers bundle their own local embedding models and provide semantic retrieval without requiring an additional plugin; however, there is no consolidation, no memory lifecycle, and nothing is interchangeable between implementations.
 
-**Claude Dream Mode** (Anthropic Managed Agents API, research preview as of 2026) introduces a `POST /v1/dreams` endpoint and a `memory_store` resource that agents can attach to sessions. Dreams run asynchronous consolidation over session transcripts and require two opt-in beta headers. The memory store format is undisclosed, there is no export API, and the capability is exclusively available to Claude models. The consolidation lifecycle Dream implements — merging duplicates, resolving contradictions, producing higher-order knowledge — is exactly the kind of feature AMP's `amp/consolidate` verb should invoke on any conformant backend.
+**Claude Dream Mode** (Anthropic Managed Agents API, research preview as of 2026) introduces a `POST /v1/dreams` endpoint and a `memory_store` resource that agents can attach to sessions. Dreams run asynchronous consolidation over session transcripts and require two opt-in beta headers. The memory store format is undisclosed, there is no export API, and the capability is exclusively available to Claude models. The consolidation lifecycle Dream implements — merging duplicates, resolving contradictions, producing higher-order knowledge — is exactly the kind of feature AMP's `amp.consolidate` verb should invoke on any conformant backend.
 
 **smriti-memcore** (MIT, PyPI, open source) is a locally-run memory system exposing 12 MCP tools. It implements a complete memory lifecycle: salience-gated ingestion, hybrid FTS5+vector retrieval with RRF fusion, multi-hop Semantic Palace graph traversal, spaced-repetition decay, and background consolidation. Despite being the most fully-featured open implementation, its tool names and schemas are not interchangeable with Supermemory's `recall`, Obsidian's `search_notes`, or Claude's `memory_store`.
 
@@ -102,7 +102,7 @@ A memory is a unit of persistent information stored on behalf of an agent. Every
 - A `score` — backend-assigned relevance score for the current query (present only in recall responses)
 - A `metadata` bag — open JSON object for backend-specific fields
 
-**ID uniqueness and namespace access:** Memory IDs are globally unique — no two memories across any namespace will share the same ID. However, access is enforced by namespace: if `agent-B` calls `amp/forget` or `amp/pin` with an ID that was created under `agent-A`'s namespace, the backend MUST return `not_found` (not an auth error). The ID is globally unique for backend deduplication purposes; the namespace determines what a given caller may see and modify.
+**ID uniqueness and namespace access:** Memory IDs are globally unique — no two memories across any namespace will share the same ID. However, access is enforced by namespace: if `agent-B` calls `amp.forget` or `amp.pin` with an ID that was created under `agent-A`'s namespace, the backend MUST return `not_found` (not an auth error). The ID is globally unique for backend deduplication purposes; the namespace determines what a given caller may see and modify.
 
 ### 4.2 Memory lifecycle
 
@@ -116,7 +116,7 @@ encode ──→ (below_threshold)    ← rejected; no memory created; no id ret
                                             (removed from backend)
 ```
 
-`(below_threshold)` and `(removed)` are outcomes of operations, not observable memory statuses. `below_threshold` appears in the `amp/encode` response when the backend rejects a memory due to low salience. `removed` means the memory no longer exists in the backend. Pinned memories can be explicitly deleted via `amp/forget` but are never archived by consolidation.
+`(below_threshold)` and `(removed)` are outcomes of operations, not observable memory statuses. `below_threshold` appears in the `amp.encode` response when the backend rejects a memory due to low salience. `removed` means the memory no longer exists in the backend. Pinned memories can be explicitly deleted via `amp.forget` but are never archived by consolidation.
 
 | Status | Description |
 |--------|-------------|
@@ -126,21 +126,23 @@ encode ──→ (below_threshold)    ← rejected; no memory created; no id ret
 
 ### 4.3 Agent identity
 
-Every AMP request carries an `agent_id` field. This allows a single backend to serve multiple agents with isolated memory namespaces. Backends MUST enforce namespace isolation: an `amp/recall` for `agent_id: "agent-A"` MUST NOT return memories encoded by `agent_id: "agent-B"` unless the backend explicitly implements a shared memory feature and the caller has opted in. Backends SHOULD create a new namespace implicitly on first `amp/encode` for an unknown `agent_id`; they MUST NOT return an error solely because the namespace is new.
+Every AMP request carries an `agent_id` field. This allows a single backend to serve multiple agents with isolated memory namespaces. Backends MUST enforce namespace isolation: an `amp.recall` for `agent_id: "agent-A"` MUST NOT return memories encoded by `agent_id: "agent-B"` unless the backend explicitly implements a shared memory feature and the caller has opted in. Backends SHOULD create a new namespace implicitly on first `amp.encode` for an unknown `agent_id`; they MUST NOT return an error solely because the namespace is new.
 
 **What is `agent_id`?** AMP intentionally leaves this to the caller. `agent_id` is an opaque, caller-defined string used as a partitioning key — it is not derived from the underlying model, model version, or agent harness. Callers may set it to an application identifier (`"my-app"`), a user session (`"user-42-session"`), a logical agent role (`"research-assistant"`), or anything else meaningful to their system. Upgrading a model or switching harnesses does not automatically change `agent_id` — that is the caller's decision. This deliberate openness means AMP does not define identity semantics; it only enforces that whatever string the caller provides is treated as a consistent namespace. See Open Question #10 for further discussion.
 
 ### 4.4 Consolidation
 
-Consolidation is an optional background process by which the backend reorganises, deduplicates, or distils raw memories into higher-order knowledge. AMP exposes `amp/consolidate` as a trigger, but the backend decides what consolidation means internally.
+Consolidation is an optional background process by which the backend reorganises, deduplicates, or distils raw memories into higher-order knowledge. AMP exposes `amp.consolidate` as a trigger, but the backend decides what consolidation means internally.
 
-**Full conformance and no-op implementations:** Full conformance requires `amp/consolidate` to be a callable, responsive endpoint — the tool must exist and return a valid AMP response. A Full-conformant backend MAY implement consolidation as a no-op (performing no internal reorganisation), in which case it MUST return `status: "ok"` with `memories_processed: 0`. We recommend that Full backends perform meaningful consolidation (deduplication, archival of superseded memories, or summarisation), but the spec does not mandate what that consolidation does internally. Core-conformant backends that have not implemented the endpoint at all MUST return `amp_error_code: not_supported` (see §5.8).
+**Full conformance and no-op implementations:** Full conformance requires `amp.consolidate` to be a callable, responsive endpoint — the tool must exist and return a valid AMP response. A Full-conformant backend MAY implement consolidation as a no-op (performing no internal reorganisation), in which case it MUST return `status: "ok"` with `memories_processed: 0`. We recommend that Full backends perform meaningful consolidation (deduplication, archival of superseded memories, or summarisation), but the spec does not mandate what that consolidation does internally. Core-conformant backends that have not implemented the endpoint at all MUST return `amp_error_code: not_supported` (see §5.8).
 
 ---
 
 ## 5. Protocol Specification
 
 All AMP tools follow MCP tool call conventions. Input is a JSON object. Output is a JSON object. Errors follow the MCP JSON-RPC error format with an additional `amp_error_code` field (see Section 5.8).
+
+**Tool naming convention:** AMP tool names use dot notation (`amp.encode`, `amp.recall`, etc.). MCP's tool naming specification (SEP-986) restricts valid characters to `A-Z, a-z, 0-9, underscore, dash, and dot` — forward slashes are not permitted. Dot notation provides the same namespace clarity (`amp.` prefix) while remaining fully compliant with the MCP standard.
 
 ### 5.1 MemoryResult — canonical response object
 
@@ -168,7 +170,7 @@ All recall responses return an array of `MemoryResult` objects.
 | `status` | string | ✓ | `active` \| `pinned` \| `archived` |
 | `metadata` | object | ✗ | Backend-specific fields (e.g. salience scores, hop distance, room ID) |
 
-### 5.2 amp/encode
+### 5.2 amp.encode
 
 Store a new memory for an agent.
 
@@ -206,7 +208,7 @@ Store a new memory for an agent.
 
 Agents MUST check the `status` field. A `below_threshold` response is not an error — the backend received the request and made a deliberate decision. To override the threshold, set `force: true`; backends that support forced encoding MUST honour it, returning `stored`.
 
-### 5.3 amp/recall
+### 5.3 amp.recall
 
 Retrieve memories relevant to a query.
 
@@ -248,7 +250,7 @@ If `filters.status` is absent, backends SHOULD return both `active` and `pinned`
 
 Results MUST be ordered by descending relevance score.
 
-### 5.4 amp/forget
+### 5.4 amp.forget
 
 Permanently delete a memory.
 
@@ -269,7 +271,7 @@ Permanently delete a memory.
 
 `status` values: `forgotten` (deleted), `not_found` (no memory with that ID in this agent namespace).
 
-### 5.5 amp/consolidate
+### 5.5 amp.consolidate
 
 Trigger backend consolidation. Backends MAY process consolidation asynchronously or synchronously.
 
@@ -296,7 +298,7 @@ Trigger backend consolidation. Backends MAY process consolidation asynchronously
 - `ok` — backend has processed synchronously; `memories_processed` SHOULD be included
 - `not_supported` — backend does not implement consolidation (valid for Core backends)
 
-### 5.6 amp/pin
+### 5.6 amp.pin
 
 Mark a memory as permanent. Pinned memories are never archived by consolidation.
 
@@ -317,7 +319,7 @@ Mark a memory as permanent. Pinned memories are never archived by consolidation.
 
 `status` values: `pinned` (success), `not_found`.
 
-### 5.7 amp/stats
+### 5.7 amp.stats
 
 Return backend statistics for an agent namespace.
 
@@ -373,18 +375,18 @@ Two conformance levels allow backends of different complexity to adopt AMP witho
 
 | Tool | Core | Full |
 |------|------|------|
-| `amp/encode` | ✓ Required | ✓ Required |
-| `amp/recall` | ✓ Required | ✓ Required |
-| `amp/forget` | ✓ Required | ✓ Required |
-| `amp/stats` | ✓ Required | ✓ Required |
-| `amp/pin` | ✗ Optional | ✓ Required |
-| `amp/consolidate` | ✗ Optional | ✓ Required |
+| `amp.encode` | ✓ Required | ✓ Required |
+| `amp.recall` | ✓ Required | ✓ Required |
+| `amp.forget` | ✓ Required | ✓ Required |
+| `amp.stats` | ✓ Required | ✓ Required |
+| `amp.pin` | ✗ Optional | ✓ Required |
+| `amp.consolidate` | ✗ Optional | ✓ Required |
 
 **Core** conformance is sufficient for backends that store and retrieve memories without lifecycle management (e.g. a Redis-backed store, a simple vector DB wrapper).
 
 **Full** conformance is required for backends that support memory lifecycle management, background consolidation, and permanent pinning.
 
-A backend advertising Core conformance MUST return `amp_error_code: not_supported` via the standard MCP error envelope (see §5.8) when `amp/pin` or `amp/consolidate` are called.
+A backend advertising Core conformance MUST return `amp_error_code: not_supported` via the standard MCP error envelope (see §5.8) when `amp.pin` or `amp.consolidate` are called.
 
 Conformance level is declared in the MCP server manifest:
 
@@ -402,16 +404,16 @@ Conformance level is declared in the MCP server manifest:
 
 **smriti-memcore** ([PyPI](https://pypi.org/project/smriti-memcore/)) is the reference Full-conformance AMP implementation. It exposes AMP tools over MCP stdio transport and demonstrates how a backend can surface richer features via the `metadata` fields without violating the base contract.
 
-Note: smriti-memcore's current MCP tool names (e.g. `smriti_encode`, `smriti_recall`) differ from the AMP verb names (`amp/encode`, `amp/recall`). A future release will expose AMP verb names as aliases. The mapping below shows the correspondence.
+Note: smriti-memcore's current MCP tool names (e.g. `smriti_encode`, `smriti_recall`) differ from the AMP verb names (`amp.encode`, `amp.recall`). A future release will expose AMP verb names as aliases. The mapping below shows the correspondence.
 
 | AMP Tool | smriti-memcore implementation |
 |----------|-------------------------------|
-| `amp/encode` | `smriti_encode` — salience-gated episodic + semantic encoding with vector embeddings |
-| `amp/recall` | `smriti_recall` — hybrid FTS5+RRF retrieval with multi-hop Semantic Palace graph traversal |
-| `amp/forget` | `smriti_forget` — removes from vector store, FTS index, and Semantic Palace |
-| `amp/consolidate` | `smriti_consolidate` — episodic buffer → Semantic Palace graph consolidation with 8 background processes |
-| `amp/pin` | `smriti_pin` — sets `MemoryStatus.PINNED`; excluded from consolidation archival |
-| `amp/stats` | `smriti_stats` — returns palace, episode buffer, vector store, and retrieval metrics |
+| `amp.encode` | `smriti_encode` — salience-gated episodic + semantic encoding with vector embeddings |
+| `amp.recall` | `smriti_recall` — hybrid FTS5+RRF retrieval with multi-hop Semantic Palace graph traversal |
+| `amp.forget` | `smriti_forget` — removes from vector store, FTS index, and Semantic Palace |
+| `amp.consolidate` | `smriti_consolidate` — episodic buffer → Semantic Palace graph consolidation with 8 background processes |
+| `amp.pin` | `smriti_pin` — sets `MemoryStatus.PINNED`; excluded from consolidation archival |
+| `amp.stats` | `smriti_stats` — returns palace, episode buffer, vector store, and retrieval metrics |
 
 smriti-memcore `metadata` in `MemoryResult` includes: `salience` (5-dimensional score), `room_id` (Semantic Palace cluster), `hops` (graph traversal distance), `reflection_level` (abstraction depth 0–3), `strength` (spaced-repetition weight). These fields enrich AMP without requiring any other conformant backend to implement them.
 
@@ -452,11 +454,11 @@ The following design questions are explicitly deferred from v1.0 and will be res
 
 1. **Multi-agent shared memory** — Should AMP define a mechanism for two agents to share a memory namespace, or is that out of scope for the base protocol?
 2. **Authentication** — Should AMP define a standard agent authentication header, or fully delegate to the MCP transport layer?
-3. **Streaming recall** — Should `amp/recall` support streaming results (useful for large `top_k`) via MCP's streaming tool response?
+3. **Streaming recall** — Should `amp.recall` support streaming results (useful for large `top_k`) via MCP's streaming tool response?
 4. **Memory versioning** — Should AMP define an `amp/update` verb, or is the encode-then-forget pattern sufficient?
 5. **Schema versioning** — How should `amp_version` in the server manifest interact with backwards compatibility as the spec evolves?
 6. **Cross-backend memory portability** — Should AMP define a memory export/import format so memories can be migrated between backends?
-7. **Pagination** — Should `amp/recall` support cursor-based pagination for backends with large memory stores, or is `top_k` sufficient?
+7. **Pagination** — Should `amp.recall` support cursor-based pagination for backends with large memory stores, or is `top_k` sufficient?
 8. **Score semantics for exact-match backends** — What should a Core-conformant backend that uses exact-match retrieval return for the `score` field?
 9. **Update semantics** — Is the encode-then-forget pattern sufficient for updating a memory, or should AMP define an `amp/update` verb?
 10. **Agent identity semantics** — What should determine an `agent_id`? Should AMP provide conventions (e.g. recommend an application-scoped ID over a model-scoped ID) to avoid interoperability issues when the same logical agent is served by different models or harnesses over time? Alternatively, is the namespace partition itself necessary, or would a single global namespace with per-memory ownership metadata be a simpler design?

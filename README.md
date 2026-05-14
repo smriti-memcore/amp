@@ -10,16 +10,16 @@ AMP is an open specification that defines a standard interface for persistent me
 
 | Verb | Description |
 |------|-------------|
-| `amp/encode` | Store a new memory for an agent |
-| `amp/recall` | Retrieve memories relevant to a query |
-| `amp/forget` | Permanently delete a memory |
-| `amp/consolidate` | Trigger backend consolidation/reorganisation |
-| `amp/pin` | Mark a memory as permanent (never archived) |
-| `amp/stats` | Return backend statistics |
+| `amp.encode` | Store a new memory for an agent |
+| `amp.recall` | Retrieve memories relevant to a query |
+| `amp.forget` | Permanently delete a memory |
+| `amp.consolidate` | Trigger backend consolidation/reorganisation |
+| `amp.pin` | Mark a memory as permanent (never archived) |
+| `amp.stats` | Return backend statistics |
 
 ## Conformance Levels
 
-**Core** — `amp/encode`, `amp/recall`, `amp/forget`, `amp/stats`. Sufficient for simple backends (Redis, basic vector DB).
+**Core** — `amp.encode`, `amp.recall`, `amp.forget`, `amp.stats`. Sufficient for simple backends (Redis, basic vector DB).
 
 **Full** — All six verbs. Required for backends with memory lifecycle management (consolidation, decay, pinning).
 
@@ -60,7 +60,7 @@ The compliance suite also speaks raw MCP over stdio — it launches your server 
 
 ### Implementing your own backend
 
-1. Implement the four Core verbs (`amp/encode`, `amp/recall`, `amp/forget`, `amp/stats`) as MCP tools using any MCP SDK or the raw wire protocol
+1. Implement the four Core verbs (`amp.encode`, `amp.recall`, `amp.forget`, `amp.stats`) as MCP tools using any MCP SDK or the raw wire protocol
 2. Declare conformance in your MCP server manifest:
    ```json
    {
@@ -75,7 +75,7 @@ The compliance suite also speaks raw MCP over stdio — it launches your server 
 
 [smriti-memcore](https://pypi.org/project/smriti-memcore/) is the reference Full-conformance AMP implementation. It provides hybrid FTS5+vector retrieval with RRF fusion, multi-hop Semantic Palace graph traversal, spaced-repetition decay, and background consolidation.
 
-The current smriti-memcore tool names (`smriti_encode`, `smriti_recall`, etc.) will gain AMP aliases (`amp/encode`, `amp/recall`, etc.) in a future release.
+The current smriti-memcore tool names (`smriti_encode`, `smriti_recall`, etc.) will gain AMP aliases (`amp.encode`, `amp.recall`, etc.) in a future release.
 
 ## Specification
 

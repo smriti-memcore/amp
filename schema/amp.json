@@ -44,7 +44,7 @@
     },
     "RecallFilters": {
       "type": "object",
-      "description": "Optional filters for amp/recall.",
+      "description": "Optional filters for amp.recall.",
       "properties": {
         "status": {
           "type": "string",
@@ -86,7 +86,7 @@
     }
   },
   "tools": {
-    "amp/encode": {
+    "amp.encode": {
       "description": "Store a new memory for an agent.",
       "input": {
         "type": "object",
@@ -134,7 +134,7 @@
         }
       }
     },
-    "amp/recall": {
+    "amp.recall": {
       "description": "Retrieve memories relevant to a query.",
       "input": {
         "type": "object",
@@ -175,7 +175,7 @@
         }
       }
     },
-    "amp/forget": {
+    "amp.forget": {
       "description": "Permanently delete a memory.",
       "input": {
         "type": "object",
@@ -204,7 +204,7 @@
         }
       }
     },
-    "amp/consolidate": {
+    "amp.consolidate": {
       "description": "Trigger backend consolidation. Full conformance only.",
       "input": {
         "type": "object",
@@ -240,7 +240,7 @@
         }
       }
     },
-    "amp/pin": {
+    "amp.pin": {
       "description": "Mark a memory as permanent (never archived by consolidation). Full conformance only.",
       "input": {
         "type": "object",
@@ -269,7 +269,7 @@
         }
       }
     },
-    "amp/stats": {
+    "amp.stats": {
       "description": "Return backend statistics for an agent namespace.",
       "input": {
         "type": "object",

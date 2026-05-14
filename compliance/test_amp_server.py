@@ -104,7 +104,7 @@ def agent_id():
 # ── Helper ─────────────────────────────────────────────────────────────────────
 
 def encode(client, agent_id, content, force=False):
-    return client.call_tool("amp/encode", {
+    return client.call_tool("amp.encode", {
         "agent_id": agent_id,
         "content": content,
         "force": force,
@@ -112,7 +112,7 @@ def encode(client, agent_id, content, force=False):
 
 
 def recall(client, agent_id, query, top_k=10):
-    return client.call_tool("amp/recall", {
+    return client.call_tool("amp.recall", {
         "agent_id": agent_id,
         "query": query,
         "top_k": top_k,
@@ -120,14 +120,14 @@ def recall(client, agent_id, query, top_k=10):
 
 
 def forget(client, agent_id, memory_id):
-    return client.call_tool("amp/forget", {
+    return client.call_tool("amp.forget", {
         "agent_id": agent_id,
         "id": memory_id,
     })
 
 
 def stats(client, agent_id):
-    return client.call_tool("amp/stats", {"agent_id": agent_id})
+    return client.call_tool("amp.stats", {"agent_id": agent_id})
 
 
 # ── Core conformance tests ─────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ def stats(client, agent_id):
 class TestEncodeCore:
     def test_encode_returns_stored_or_below_threshold(self, client, agent_id):
         resp = encode(client, agent_id, "The user prefers dark mode")
-        assert "error" not in resp, f"amp/encode returned error: {resp}"
+        assert "error" not in resp, f"amp.encode returned error: {resp}"
         assert resp.get("status") in ("stored", "below_threshold")
 
     def test_encode_with_force_returns_stored(self, client, agent_id):
@@ -150,17 +150,17 @@ class TestEncodeCore:
         assert resp.get("id") is not None and resp["id"] != ""
 
     def test_encode_empty_content_returns_error(self, client, agent_id):
-        resp = client.call_tool("amp/encode", {"agent_id": agent_id, "content": ""})
+        resp = client.call_tool("amp.encode", {"agent_id": agent_id, "content": ""})
         # Backend may return error or below_threshold for empty content
         assert "error" in resp or resp.get("status") in ("below_threshold",), \
             "Empty content should result in an error or below_threshold"
 
     def test_encode_missing_agent_id_returns_error(self, client):
-        resp = client.call_tool("amp/encode", {"content": "some content"})
+        resp = client.call_tool("amp.encode", {"content": "some content"})
         assert "error" in resp, "Missing agent_id should return an error"
 
     def test_encode_missing_content_returns_error(self, client, agent_id):
-        resp = client.call_tool("amp/encode", {"agent_id": agent_id})
+        resp = client.call_tool("amp.encode", {"agent_id": agent_id})
         assert "error" in resp, "Missing content should return an error"
 
 
@@ -203,7 +203,7 @@ class TestRecallCore:
         assert isinstance(results, list)
 
     def test_recall_missing_agent_id_returns_error(self, client):
-        resp = client.call_tool("amp/recall", {"query": "something"})
+        resp = client.call_tool("amp.recall", {"query": "something"})
         assert "error" in resp
 
     def test_recall_namespace_isolation(self, client):
@@ -257,7 +257,7 @@ class TestStatsCore:
 
 
 # ── Full conformance tests ─────────────────────────────────────────────────────
-# These tests check amp/pin and amp/consolidate.
+# These tests check amp.pin and amp.consolidate.
 # On a Core-only server, both should return status: "not_supported".
 
 class TestPinFull:
@@ -266,31 +266,31 @@ class TestPinFull:
         if resp_enc.get("status") != "stored":
             pytest.skip("Encode did not store memory")
         mem_id = resp_enc["id"]
-        resp = client.call_tool("amp/pin", {"agent_id": agent_id, "id": mem_id})
+        resp = client.call_tool("amp.pin", {"agent_id": agent_id, "id": mem_id})
         assert "error" not in resp
         assert resp.get("status") in ("pinned", "not_supported")
 
     def test_pin_unknown_id_returns_not_found_or_not_supported(self, client, agent_id):
-        resp = client.call_tool("amp/pin", {"agent_id": agent_id, "id": "nonexistent-zzz"})
+        resp = client.call_tool("amp.pin", {"agent_id": agent_id, "id": "nonexistent-zzz"})
         assert "error" not in resp
         assert resp.get("status") in ("not_found", "not_supported")
 
 
 class TestConsolidateFull:
     def test_consolidate_returns_valid_status(self, client, agent_id):
-        resp = client.call_tool("amp/consolidate", {"agent_id": agent_id, "depth": "full"})
+        resp = client.call_tool("amp.consolidate", {"agent_id": agent_id, "depth": "full"})
         assert "error" not in resp
         assert resp.get("status") in ("queued", "ok", "not_supported")
 
     def test_consolidate_light_depth(self, client, agent_id):
-        resp = client.call_tool("amp/consolidate", {"agent_id": agent_id, "depth": "light"})
+        resp = client.call_tool("amp.consolidate", {"agent_id": agent_id, "depth": "light"})
         assert "error" not in resp
         assert resp.get("status") in ("queued", "ok", "not_supported")
 
     def test_consolidate_ok_includes_memories_processed(self, client, agent_id):
         for i in range(3):
             encode(client, agent_id, f"Memory for consolidation test {i}", force=True)
-        resp = client.call_tool("amp/consolidate", {"agent_id": agent_id, "depth": "full"})
+        resp = client.call_tool("amp.consolidate", {"agent_id": agent_id, "depth": "full"})
         if resp.get("status") == "ok":
             assert "memories_processed" in resp
             assert isinstance(resp["memories_processed"], int)
@@ -304,7 +304,7 @@ class TestErrorHandling:
         assert "error" in resp
 
     def test_error_has_amp_error_code_for_invalid_request(self, client, agent_id):
-        resp = client.call_tool("amp/encode", {"agent_id": agent_id})  # missing content
+        resp = client.call_tool("amp.encode", {"agent_id": agent_id})  # missing content
         if "error" in resp:
             error_data = resp["error"].get("data", {})
             if error_data:

@@ -2,7 +2,7 @@
 AMP Minimal Example Server
 
 A Core-conformant AMP server using in-memory storage.
-Implements: amp/encode, amp/recall, amp/forget, amp/stats
+Implements: amp.encode, amp.recall, amp.forget, amp.stats
 
 Run with:
     python examples/minimal_server.py
@@ -108,7 +108,7 @@ def _error(code: int, message: str, amp_code: str = "backend_error") -> Dict:
 
 TOOLS = [
     {
-        "name": "amp/encode",
+        "name": "amp.encode",
         "description": "Store a new memory for an agent.",
         "inputSchema": {
             "type": "object",
@@ -123,7 +123,7 @@ TOOLS = [
         },
     },
     {
-        "name": "amp/recall",
+        "name": "amp.recall",
         "description": "Retrieve memories relevant to a query.",
         "inputSchema": {
             "type": "object",
@@ -137,7 +137,7 @@ TOOLS = [
         },
     },
     {
-        "name": "amp/forget",
+        "name": "amp.forget",
         "description": "Permanently delete a memory.",
         "inputSchema": {
             "type": "object",
@@ -149,7 +149,7 @@ TOOLS = [
         },
     },
     {
-        "name": "amp/stats",
+        "name": "amp.stats",
         "description": "Return backend statistics for an agent namespace.",
         "inputSchema": {
             "type": "object",
@@ -160,7 +160,7 @@ TOOLS = [
         },
     },
     {
-        "name": "amp/pin",
+        "name": "amp.pin",
         "description": "Mark a memory as permanent (not_supported on this Core server).",
         "inputSchema": {
             "type": "object",
@@ -172,7 +172,7 @@ TOOLS = [
         },
     },
     {
-        "name": "amp/consolidate",
+        "name": "amp.consolidate",
         "description": "Trigger consolidation (not_supported on this Core server).",
         "inputSchema": {
             "type": "object",
@@ -224,7 +224,7 @@ def handle_request(req: Dict) -> Dict:
         tool_name = params.get("name", "")
         args = params.get("arguments", {})
 
-        if tool_name == "amp/encode":
+        if tool_name == "amp.encode":
             if "agent_id" not in args or "content" not in args:
                 return error(-32000, "Missing required field", "invalid_request")
             result = _encode(
@@ -235,7 +235,7 @@ def handle_request(req: Dict) -> Dict:
             )
             return respond(_tool_result(result))
 
-        if tool_name == "amp/recall":
+        if tool_name == "amp.recall":
             if "agent_id" not in args or "query" not in args:
                 return error(-32000, "Missing required field", "invalid_request")
             result = _recall(
@@ -246,19 +246,19 @@ def handle_request(req: Dict) -> Dict:
             )
             return respond(_tool_result(result))
 
-        if tool_name == "amp/forget":
+        if tool_name == "amp.forget":
             if "agent_id" not in args or "id" not in args:
                 return error(-32000, "Missing required field", "invalid_request")
             result = _forget(args["agent_id"], args["id"])
             return respond(_tool_result(result))
 
-        if tool_name == "amp/stats":
+        if tool_name == "amp.stats":
             if "agent_id" not in args:
                 return error(-32000, "Missing required field", "invalid_request")
             result = _stats(args["agent_id"])
             return respond(_tool_result(result))
 
-        if tool_name in ("amp/pin", "amp/consolidate"):
+        if tool_name in ("amp.pin", "amp.consolidate"):
             return respond(_tool_result({"status": "not_supported"}))
 
         return error(-32601, f"Unknown tool: {tool_name}", "backend_error")
