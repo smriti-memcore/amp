@@ -23,14 +23,8 @@ import pytest
 
 
 # ── CLI option ────────────────────────────────────────────────────────────────
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--server-cmd",
-        default="python examples/minimal_server.py",
-        help="Shell command to launch the AMP server under test",
-    )
-
+# pytest_addoption is defined in compliance/conftest.py so it is always loaded
+# before argument parsing. Defining it here in a test module is unreliable.
 
 @pytest.fixture(scope="session")
 def server_cmd(request):
@@ -64,22 +58,38 @@ class MCPClient:
         line = self._proc.stdout.readline()
         return json.loads(line)
 
+    def _notify(self, method: str, params: Dict) -> None:
+        """Send a JSON-RPC notification (no id, no response expected)."""
+        payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
+        self._proc.stdin.write(payload + "\n")
+        self._proc.stdin.flush()
+
     def _handshake(self):
         self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "amp-compliance-tester", "version": "1.0"},
         })
+        # Required by MCP spec — servers compliant with the full protocol
+        # (e.g. FastMCP) will not accept tool calls until this is sent.
+        self._notify("notifications/initialized", {})
 
     def call_tool(self, name: str, arguments: Dict) -> Dict:
         resp = self._send("tools/call", {"name": name, "arguments": arguments})
         if "error" in resp:
             return {"error": resp["error"]}
-        content = resp.get("result", {}).get("content", [])
+        result = resp.get("result", {})
+        content = result.get("content", [])
         for block in content:
             if block.get("type") == "text":
-                return json.loads(block["text"])
-        return resp.get("result", {})
+                try:
+                    return json.loads(block["text"])
+                except (json.JSONDecodeError, ValueError):
+                    # Server returned a plain-text error (e.g. FastMCP isError responses)
+                    if result.get("isError"):
+                        return {"error": {"message": block["text"]}}
+                    raise
+        return result
 
     def close(self):
         try:
