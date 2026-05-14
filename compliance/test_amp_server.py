@@ -10,7 +10,7 @@ Or against the bundled minimal example:
 
     pytest compliance/test_amp_server.py --server-cmd "python examples/minimal_server.py"
 
-Requires: pytest, mcp
+Requires: pytest
 """
 
 import json

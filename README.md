@@ -42,11 +42,10 @@ amp/
 ### Running the minimal example server
 
 ```bash
-pip install mcp
 python examples/minimal_server.py
 ```
 
-This starts a Core-conformant AMP server over MCP stdio. Connect it to any MCP client.
+No dependencies — pure Python stdlib. This starts a Core-conformant AMP server over MCP stdio. Connect it to any MCP client.
 
 ### Running the compliance suite against your server
 
