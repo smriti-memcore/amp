@@ -65,11 +65,12 @@ class MCPClient:
         self._proc.stdin.flush()
 
     def _handshake(self):
-        self._send("initialize", {
+        resp = self._send("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "amp-compliance-tester", "version": "1.0"},
         })
+        self.server_info = resp.get("result", {}).get("serverInfo", {})
         # Required by MCP spec — servers compliant with the full protocol
         # (e.g. FastMCP) will not accept tool calls until this is sent.
         self._notify("notifications/initialized", {})
@@ -219,12 +220,14 @@ class TestRecallCore:
     def test_recall_namespace_isolation(self, client):
         agent_a = f"agent-a-{uuid.uuid4().hex[:6]}"
         agent_b = f"agent-b-{uuid.uuid4().hex[:6]}"
-        encode(client, agent_a, "Secret information for agent A only", force=True)
-        resp = recall(client, agent_b, "Secret information agent A")
+        enc_resp = encode(client, agent_a, "Secret information for agent A only xns001", force=True)
+        assert enc_resp.get("status") == "stored", "Encode must succeed for isolation test to be meaningful"
+        leaked_id = enc_resp["id"]
+        resp = recall(client, agent_b, "Secret information agent A xns001")
         ids = [m["id"] for m in resp.get("results", [])]
-        # Verify no cross-namespace leakage — agent_b should not see agent_a memories
-        # (this is a best-effort check; specific IDs would need to be tracked)
-        assert isinstance(ids, list)  # at minimum, response is valid
+        assert leaked_id not in ids, (
+            f"Namespace isolation failure: agent_b recalled memory {leaked_id} belonging to agent_a"
+        )
 
 
 class TestForgetCore:
@@ -304,6 +307,232 @@ class TestConsolidateFull:
         if resp.get("status") == "ok":
             assert "memories_processed" in resp
             assert isinstance(resp["memories_processed"], int)
+
+
+# ── Extended encode tests ─────────────────────────────────────────────────────
+
+class TestEncodeExtended:
+    def test_encode_whitespace_only_returns_below_threshold(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {"agent_id": agent_id, "content": "   "})
+        assert "error" in resp or resp.get("status") == "below_threshold", \
+            "Whitespace-only content should be treated the same as empty"
+
+    def test_encode_with_source_param_accepted(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "Memory with explicit source label",
+            "source": "user_stated",
+            "force": True,
+        })
+        assert "error" not in resp
+        assert resp.get("status") == "stored"
+
+    def test_encode_content_is_retrievable(self, client, agent_id):
+        token = f"xtok_{uuid.uuid4().hex[:8]}"
+        encode(client, agent_id, f"The user likes {token} very much", force=True)
+        resp = recall(client, agent_id, token)
+        contents = [m["content"] for m in resp.get("results", [])]
+        assert any(token in c for c in contents), \
+            "Encoded content must be retrievable by a matching recall query"
+
+    def test_encode_same_content_twice_creates_unique_ids(self, client, agent_id):
+        r1 = client.call_tool("amp.encode", {"agent_id": agent_id, "content": "Duplicate content xdup99", "force": True})
+        r2 = client.call_tool("amp.encode", {"agent_id": agent_id, "content": "Duplicate content xdup99", "force": True})
+        if r1.get("status") == "stored" and r2.get("status") == "stored":
+            assert r1["id"] != r2["id"], "Each amp.encode call must produce a unique memory ID"
+
+
+# ── Extended recall tests ──────────────────────────────────────────────────────
+
+class TestRecallExtended:
+    def test_recall_results_sorted_by_score_descending(self, client, agent_id):
+        encode(client, agent_id, "cats dogs birds fish xsort1", force=True)
+        encode(client, agent_id, "cats only xsort2", force=True)
+        resp = recall(client, agent_id, "cats dogs birds fish")
+        scores = [m["score"] for m in resp.get("results", [])]
+        assert scores == sorted(scores, reverse=True), \
+            "Recall results must be ordered by score descending"
+
+    def test_recall_score_is_numeric_and_nonnegative(self, client, agent_id):
+        encode(client, agent_id, "score validation memory xscorechk", force=True)
+        resp = recall(client, agent_id, "xscorechk")
+        for mem in resp.get("results", []):
+            assert isinstance(mem["score"], (int, float)), "score must be numeric"
+            assert mem["score"] >= 0, "score must be non-negative"
+
+    def test_recall_top_k_one_returns_at_most_one(self, client, agent_id):
+        for i in range(3):
+            encode(client, agent_id, f"topk test item number {i} xtopk", force=True)
+        resp = recall(client, agent_id, "xtopk topk test", top_k=1)
+        assert len(resp.get("results", [])) <= 1, "top_k=1 must return at most 1 result"
+
+    def test_recall_with_status_filter_active(self, client, agent_id):
+        encode(client, agent_id, "status filter active memory xsfilter", force=True)
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xsfilter",
+            "filters": {"status": "active"},
+        })
+        assert "error" not in resp
+        for mem in resp.get("results", []):
+            assert mem["status"] == "active", \
+                "Status filter active must exclude non-active memories"
+
+
+# ── Extended stats tests ───────────────────────────────────────────────────────
+
+class TestStatsExtended:
+    def test_stats_count_decreases_after_forget(self, client, agent_id):
+        resp = encode(client, agent_id, "Memory to forget for stats xstatdec", force=True)
+        assert resp.get("status") == "stored"
+        before = stats(client, agent_id)["memory_count"]
+        forget(client, agent_id, resp["id"])
+        after = stats(client, agent_id)["memory_count"]
+        assert after < before, "memory_count must decrease after forgetting a memory"
+
+    def test_stats_unconsolidated_count_is_valid_if_present(self, client, agent_id):
+        resp = stats(client, agent_id)
+        if "unconsolidated_count" in resp:
+            assert isinstance(resp["unconsolidated_count"], int)
+            assert resp["unconsolidated_count"] >= 0
+
+
+# ── Tools list tests ───────────────────────────────────────────────────────────
+
+class TestRecallFilters:
+    def test_recall_source_filter_accepted(self, client, agent_id):
+        encode(client, agent_id, "source filter test memory xsrcflt", force=True)
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xsrcflt",
+            "filters": {"source": "direct"},
+        })
+        assert "error" not in resp
+        assert "results" in resp
+
+    def test_recall_timestamp_after_filter_accepted(self, client, agent_id):
+        encode(client, agent_id, "timestamp filter test memory xtsflt", force=True)
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xtsflt",
+            "filters": {"timestamp_after": "2020-01-01T00:00:00Z"},
+        })
+        assert "error" not in resp
+        assert "results" in resp
+
+    def test_recall_timestamp_before_filter_accepted(self, client, agent_id):
+        encode(client, agent_id, "timestamp before test memory xtsbflt", force=True)
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xtsbflt",
+            "filters": {"timestamp_before": "2099-01-01T00:00:00Z"},
+        })
+        assert "error" not in resp
+        assert "results" in resp
+
+
+class TestNamespaceAccess:
+    def test_new_namespace_does_not_error(self, client):
+        fresh_agent = f"fresh-agent-{uuid.uuid4().hex}"
+        resp = encode(client, fresh_agent, "First memory for brand new namespace", force=True)
+        assert "error" not in resp, \
+            "Backend MUST NOT return an error for an unknown (new) agent_id"
+
+    def test_cross_namespace_forget_returns_not_found(self, client):
+        agent_a = f"ns-a-{uuid.uuid4().hex[:6]}"
+        agent_b = f"ns-b-{uuid.uuid4().hex[:6]}"
+        enc = encode(client, agent_a, "Agent A private memory xcrossns", force=True)
+        assert enc.get("status") == "stored"
+        mem_id = enc["id"]
+        resp = forget(client, agent_b, mem_id)
+        assert "error" not in resp
+        assert resp.get("status") == "not_found", (
+            "Forgetting another agent's memory ID MUST return not_found, not an auth error"
+        )
+
+
+class TestMissingRequiredFields:
+    def test_forget_missing_agent_id_returns_error(self, client):
+        resp = client.call_tool("amp.forget", {"id": "some-id"})
+        assert "error" in resp, "amp.forget with missing agent_id must return an error"
+
+    def test_forget_missing_id_returns_error(self, client, agent_id):
+        resp = client.call_tool("amp.forget", {"agent_id": agent_id})
+        assert "error" in resp, "amp.forget with missing id must return an error"
+
+    def test_stats_missing_agent_id_returns_error(self, client):
+        resp = client.call_tool("amp.stats", {})
+        assert "error" in resp, "amp.stats with missing agent_id must return an error"
+
+    def test_error_code_is_minus_32000(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {"agent_id": agent_id})  # missing content
+        if "error" in resp:
+            code = resp["error"].get("code")
+            assert code == -32000, \
+                f"AMP errors MUST use JSON-RPC code -32000 (got {code})"
+
+
+class TestServerManifest:
+    def test_initialize_response_has_amp_conformance(self, client):
+        assert "amp_conformance" in client.server_info, \
+            "Server manifest MUST include amp_conformance field"
+        assert client.server_info["amp_conformance"] in ("core", "full"), \
+            "amp_conformance must be 'core' or 'full'"
+
+    def test_initialize_response_has_amp_version(self, client):
+        assert "amp_version" in client.server_info, \
+            "Server manifest MUST include amp_version field"
+        assert isinstance(client.server_info["amp_version"], str)
+        assert client.server_info["amp_version"] != "", \
+            "amp_version must be a non-empty string"
+
+
+class TestConsolidateExtended:
+    def test_consolidate_no_depth_param_defaults_gracefully(self, client, agent_id):
+        resp = client.call_tool("amp.consolidate", {"agent_id": agent_id})
+        assert "error" not in resp
+        assert resp.get("status") in ("queued", "ok", "not_supported"), \
+            "consolidate without depth param must use default and return a valid status"
+
+
+class TestContentFidelity:
+    def test_recalled_content_matches_encoded_exactly(self, client, agent_id):
+        content = f"Exact content fidelity test xfidelity_{uuid.uuid4().hex[:8]}"
+        enc = encode(client, agent_id, content, force=True)
+        assert enc.get("status") == "stored"
+        resp = recall(client, agent_id, f"xfidelity")
+        matched = [m for m in resp.get("results", []) if m.get("id") == enc["id"]]
+        assert matched, "Encoded memory must be retrievable by its content token"
+        assert matched[0]["content"] == content, \
+            "Recalled content must exactly match the content that was encoded"
+
+
+class TestToolsList:
+    def test_tools_list_contains_core_verbs(self, client):
+        resp = client._send("tools/list", {})
+        tools = resp.get("result", {}).get("tools", [])
+        names = {t["name"] for t in tools}
+        core_verbs = {"amp.encode", "amp.recall", "amp.forget", "amp.stats"}
+        missing = core_verbs - names
+        assert not missing, f"Server is missing required core AMP tools: {missing}"
+
+    def test_tools_list_all_entries_have_required_fields(self, client):
+        resp = client._send("tools/list", {})
+        tools = resp.get("result", {}).get("tools", [])
+        assert tools, "tools/list must return a non-empty list"
+        for tool in tools:
+            assert "name" in tool, f"Tool entry missing 'name': {tool}"
+            assert "description" in tool, f"Tool {tool.get('name')} missing 'description'"
+            assert "inputSchema" in tool, f"Tool {tool.get('name')} missing 'inputSchema'"
+
+    def test_tools_list_input_schemas_have_agent_id(self, client):
+        resp = client._send("tools/list", {})
+        tools = resp.get("result", {}).get("tools", [])
+        amp_tools = [t for t in tools if t["name"].startswith("amp.")]
+        for tool in amp_tools:
+            props = tool.get("inputSchema", {}).get("properties", {})
+            assert "agent_id" in props, \
+                f"Tool {tool['name']} inputSchema must include agent_id property"
 
 
 # ── Error handling tests ───────────────────────────────────────────────────────

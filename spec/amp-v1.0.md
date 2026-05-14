@@ -1,6 +1,6 @@
 # Agent Memory Protocol (AMP) — Specification v1.0
 
-> **Status:** Draft v1.0 — 2026-05-10
+> **Status:** v1.0 — 2026-05-14
 > **Authors:** \<TBA\>
 > **Target:** arXiv + public GitHub spec repo
 
@@ -386,7 +386,7 @@ Two conformance levels allow backends of different complexity to adopt AMP witho
 
 **Full** conformance is required for backends that support memory lifecycle management, background consolidation, and permanent pinning.
 
-A backend advertising Core conformance MUST return `amp_error_code: not_supported` via the standard MCP error envelope (see §5.8) when `amp.pin` or `amp.consolidate` are called.
+A backend advertising Core conformance MUST return `status: "not_supported"` in the tool response (not an MCP error envelope) when `amp.pin` or `amp.consolidate` are called. This is consistent with the per-verb definitions in §5.5 and §5.6 and allows clients to distinguish "not supported" from a genuine protocol error.
 
 Conformance level is declared in the MCP server manifest:
 
@@ -394,7 +394,7 @@ Conformance level is declared in the MCP server manifest:
 {
   "name": "my-memory-backend",
   "amp_conformance": "full",
-  "amp_version": "0.1"
+  "amp_version": "1.0"
 }
 ```
 

@@ -263,7 +263,7 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["pinned", "not_found"],
+            "enum": ["pinned", "not_found", "not_supported"],
             "description": "Outcome of the pin operation."
           }
         }
