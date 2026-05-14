@@ -80,7 +80,7 @@ See [spec/amp-v0.1.md](spec/amp-v0.1.md) for the full specification.
 
 ## Status
 
-Draft v0.1 — 2026-05-10. Community review in progress.
+v1.0 — 2026-05-14. Ready for community implementation and feedback.
 
 Open questions and next steps are tracked in [spec/amp-v0.1.md § Open Questions](spec/amp-v0.1.md#9-open-questions).
 
