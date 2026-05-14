@@ -34,7 +34,7 @@ amp/
 ├── examples/               # Example implementations
 │   └── minimal_server.py   # Minimal Core-conformant MCP server
 └── python/                 # Python reference implementation
-    └── amp-server/         # smriti-memcore AMP wrapper (coming soon)
+    └── amp-server/         # smriti-memcore AMP wrapper (planned)
 ```
 
 ## Quick Start
@@ -47,7 +47,7 @@ python examples/minimal_server.py
 
 No external dependencies — pure Python stdlib. The server speaks the MCP wire protocol (JSON-RPC 2.0 over stdio) manually: it handles `initialize`, `tools/list`, and `tools/call` without using the `mcp` Python package. This is intentional — it shows that AMP is a protocol convention, not a library dependency.
 
-> **Note:** `examples/minimal_server.py` is a teaching tool, not a production server. For a production AMP backend, use the [`mcp` Python package](https://pypi.org/project/mcp/) (Anthropic's official SDK) to get full protocol compliance. See `python/amp-server/` for the production reference implementation (coming soon).
+> **Note:** `examples/minimal_server.py` is a teaching tool, not a production server. For a production AMP backend, use the [`mcp` Python package](https://pypi.org/project/mcp/) (Anthropic's official SDK) to get full protocol compliance. See `python/amp-server/` for the production reference implementation (planned).
 
 ### Running the compliance suite against your server
 
