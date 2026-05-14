@@ -4,11 +4,11 @@ AMP Compliance Test Suite v1.0
 Tests any AMP-conformant server via MCP stdio transport.
 Run against your server with:
 
-    pytest compliance/test_amp_server.py --server-cmd "python your_server.py"
+    pytest compliance/test_amp_server.py --server-cmd "python3 your_server.py"
 
 Or against the bundled minimal example:
 
-    pytest compliance/test_amp_server.py --server-cmd "python examples/minimal_server.py"
+    pytest compliance/test_amp_server.py --server-cmd "python3 examples/minimal_server.py"
 
 Requires: pytest
 """

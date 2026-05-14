@@ -43,7 +43,7 @@ amp/
 ### Running the minimal example server
 
 ```bash
-python examples/minimal_server.py
+python3 examples/minimal_server.py
 ```
 
 No external dependencies — pure Python stdlib. The server speaks the MCP wire protocol (JSON-RPC 2.0 over stdio) manually: it handles `initialize`, `tools/list`, and `tools/call` without using the `mcp` Python package. This is intentional — it shows that AMP is a protocol convention, not a library dependency.
@@ -54,7 +54,7 @@ No external dependencies — pure Python stdlib. The server speaks the MCP wire 
 
 ```bash
 pip install pytest
-pytest compliance/test_amp_server.py --server-cmd "python your_server.py"
+pytest compliance/test_amp_server.py --server-cmd "python3 your_server.py"
 ```
 
 The compliance suite speaks raw MCP over stdio — it performs the full MCP handshake (`initialize` + `notifications/initialized`) and then sends `tools/call` messages directly, so it works against any AMP server regardless of which MCP SDK it uses internally (including FastMCP-based servers).
