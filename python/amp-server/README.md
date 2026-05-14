@@ -48,12 +48,14 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "amp": {
-      "command": "amp-server",
+      "command": "/absolute/path/to/amp-server",
       "args": ["--storage-path", "/Users/you/.amp"]
     }
   }
 }
 ```
+
+*Note: Claude Desktop does not inherit your shell's `PATH`. You must provide the absolute path to the `amp-server` executable (e.g., `~/.local/bin/amp-server` or `/path/to/venv/bin/amp-server`).*
 
 ## Connect to Claude Code
 
