@@ -404,7 +404,7 @@ Conformance level is declared in the MCP server manifest:
 
 **smriti-memcore** ([PyPI](https://pypi.org/project/smriti-memcore/)) is the reference Full-conformance AMP implementation. It exposes AMP tools over MCP stdio transport and demonstrates how a backend can surface richer features via the `metadata` fields without violating the base contract.
 
-Note: smriti-memcore's current MCP tool names (e.g. `smriti_encode`, `smriti_recall`) differ from the AMP verb names (`amp.encode`, `amp.recall`). A future release will expose AMP verb names as aliases. The mapping below shows the correspondence.
+As of v1.2.0, smriti-memcore's MCP server exposes both its native tool names (`smriti_encode`, `smriti_recall`, etc.) and the AMP verb aliases (`amp.encode`, `amp.recall`, etc.) on the same server. The AMP verbs accept the standard `agent_id` parameter (accepted, ignored — smriti-memcore is single-tenant at the storage-path level). The mapping is:
 
 | AMP Tool | smriti-memcore implementation |
 |----------|-------------------------------|
@@ -472,7 +472,7 @@ The following design questions are explicitly deferred from v1.0 and will be res
 - [ ] Publish spec to public GitHub repo
 - [ ] Submit to arXiv (cs.AI)
 - [x] Reference implementation: `amp-server` (Full-conformant, FastMCP + smriti-memcore, `pip install amp-server`) published to PyPI
-- [ ] Reference implementation: update smriti-memcore to expose AMP tool names (`amp.encode`, `amp.recall`, etc.) as aliases alongside existing tool names
+- [x] Reference implementation: smriti-memcore v1.2.0 exposes AMP tool names (`amp.encode`, `amp.recall`, etc.) as aliases alongside existing `smriti_*` tools; passes all 25 AMP compliance tests
 - [ ] Reach out to LangChain, LlamaIndex, and Anthropic SDK teams for feedback
 
 ---

@@ -56,7 +56,7 @@ pip install pytest
 pytest compliance/test_amp_server.py --server-cmd "python your_server.py"
 ```
 
-The compliance suite also speaks raw MCP over stdio — it launches your server as a subprocess and sends JSON-RPC messages directly, so it works against any AMP server regardless of which MCP SDK it uses internally.
+The compliance suite speaks raw MCP over stdio — it performs the full MCP handshake (`initialize` + `notifications/initialized`) and then sends `tools/call` messages directly, so it works against any AMP server regardless of which MCP SDK it uses internally (including FastMCP-based servers).
 
 ### Implementing your own backend
 
@@ -75,7 +75,7 @@ The compliance suite also speaks raw MCP over stdio — it launches your server 
 
 [`amp-server`](python/amp-server/README.md) is the reference Full-conformant AMP implementation (`pip install amp-server`). It wraps [smriti-memcore](https://pypi.org/project/smriti-memcore/) — providing hybrid FTS5+vector retrieval with RRF fusion, multi-hop Semantic Palace graph traversal, spaced-repetition decay, and background consolidation — and exposes all six AMP verbs over MCP stdio.
 
-> **Note:** smriti-memcore's native tool names (`smriti_encode`, `smriti_recall`, etc.) will gain AMP aliases (`amp.encode`, `amp.recall`, etc.) directly in a future smriti-memcore release.
+> **Note:** smriti-memcore v1.2.0+ exposes both its native `smriti_*` tools and the AMP verb aliases (`amp.encode`, `amp.recall`, etc.) on the same MCP server — no separate install needed.
 
 ## Specification
 
