@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="AMPLogo.png" alt="AMP Logo" width="200"/>
+</div>
+
 # Agent Memory Protocol (AMP)
 *By Community, Of Community, For Community*
 
