@@ -92,6 +92,17 @@ v1.0 — 2026-05-14. Ready for community implementation and feedback.
 
 Open questions and next steps are tracked in [spec/amp-v1.0.md § Open Questions](spec/amp-v1.0.md#9-open-questions).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
+
+**Quick entry points:**
+
+- **Discuss an open question** — each of the 10 open questions in [spec §9](spec/amp-v1.0.md#9-open-questions) has a GitHub issue labeled [`open-question`](https://github.com/smriti-memcore/amp/labels/open-question)
+- **Build a conformant backend** — run the compliance suite and open a [New Implementation](https://github.com/smriti-memcore/amp/issues/new?template=new-implementation.md) issue
+- **Improve the compliance suite** — add edge-case tests or port to TypeScript/Go
+- **Good first issue** — a Redis Core-conformant backend is a well-scoped starting point
+
 ## License
 
 This specification and all code in this repository are released under the [MIT License](LICENSE).

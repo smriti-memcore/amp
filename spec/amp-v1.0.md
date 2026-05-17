@@ -456,30 +456,29 @@ smriti-memcore `metadata` in `MemoryResult` includes: `salience` (5-dimensional 
 
 ## 9. Open Questions
 
-The following design questions are explicitly deferred from v1.0 and will be resolved based on community feedback:
+The following design questions are deferred from v1.0 and will be resolved based on community feedback. Open an issue at [github.com/smriti-memcore/amp](https://github.com/smriti-memcore/amp) to contribute.
 
 1. **Multi-agent shared memory** — Should AMP define a mechanism for two agents to share a memory namespace, or is that out of scope for the base protocol?
 2. **Authentication** — Should AMP define a standard agent authentication header, or fully delegate to the MCP transport layer?
 3. **Streaming recall** — Should `amp.recall` support streaming results (useful for large `top_k`) via MCP's streaming tool response?
-4. **Memory versioning** — Should AMP define an `amp/update` verb, or is the encode-then-forget pattern sufficient?
+4. **Update semantics** — Is the encode-then-forget pattern sufficient for updating a memory, or should AMP define an `amp.update` verb?
 5. **Schema versioning** — How should `amp_version` in the server manifest interact with backwards compatibility as the spec evolves?
 6. **Cross-backend memory portability** — Should AMP define a memory export/import format so memories can be migrated between backends?
 7. **Pagination** — Should `amp.recall` support cursor-based pagination for backends with large memory stores, or is `top_k` sufficient?
 8. **Score semantics for exact-match backends** — What should a Core-conformant backend that uses exact-match retrieval return for the `score` field?
-9. **Update semantics** — Is the encode-then-forget pattern sufficient for updating a memory, or should AMP define an `amp/update` verb?
-10. **Agent identity semantics** — What should determine an `agent_id`? Should AMP provide conventions (e.g. recommend an application-scoped ID over a model-scoped ID) to avoid interoperability issues when the same logical agent is served by different models or harnesses over time? Alternatively, is the namespace partition itself necessary, or would a single global namespace with per-memory ownership metadata be a simpler design?
+9. **Agent identity semantics** — What should determine an `agent_id`? Should AMP provide conventions (e.g. recommend an application-scoped ID over a model-scoped ID) to avoid interoperability issues when the same logical agent is served by different models or harnesses over time? Alternatively, is the namespace partition itself necessary, or would a single global namespace with per-memory ownership metadata be a simpler design?
+10. **Team / federated memory** — How should individual agent memories be aggregated into a shared team namespace? Should AMP define a sync verb or export format, or is this out of scope for the base protocol?
 
 ---
 
 ## 10. Next Steps
 
-- [ ] Community review of this draft
-- [ ] Resolve open questions in Section 9
-- [ ] Publish spec to public GitHub repo
-- [ ] Submit to arXiv (cs.AI)
-- [ ] Publish `amp-server` to PyPI (`pip install amp-server`); currently install from source via `pip install "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-server"`
+- [x] Publish spec to public GitHub repo — v1.0 live at [github.com/smriti-memcore/amp](https://github.com/smriti-memcore/amp)
 - [x] Reference implementation: smriti-memcore v1.2.0 exposes AMP tool names (`amp.encode`, `amp.recall`, etc.) as aliases alongside existing `smriti_*` tools; passes all 25 AMP compliance tests
-- [ ] Reach out to LangChain, LlamaIndex, and Anthropic SDK teams for feedback
+- [ ] Community review and feedback — open questions in Section 9 will be resolved based on community input
+- [ ] Publish `amp-server` to PyPI (`pip install amp-server`); currently install from source via `pip install "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-server"`
+- [ ] Seeking adoption feedback from major agent frameworks (LangChain, LlamaIndex, Anthropic SDK)
+- [ ] Additional conformant implementations beyond the reference
 
 ---
 
