@@ -156,6 +156,7 @@ All recall responses return an array of `MemoryResult` objects.
   "source": "user_stated",
   "timestamp": "2026-05-10T08:00:00Z",
   "status": "active",
+  "visibility": "shared",
   "metadata": {}
 }
 ```
@@ -168,6 +169,7 @@ All recall responses return an array of `MemoryResult` objects.
 | `source` | string | ✗ | Provenance label |
 | `timestamp` | string | ✓ | ISO 8601 creation time |
 | `status` | string | ✓ | `active` \| `pinned` \| `archived` |
+| `visibility` | string | ✗ | `private` \| `shared`. Whether this memory is eligible for team consolidation sync. Defaults to `shared` if absent. Backends that do not implement privacy SHOULD omit this field. |
 | `metadata` | object | ✗ | Backend-specific fields (e.g. salience scores, hop distance, room ID) |
 
 ### 5.2 amp.encode
@@ -181,6 +183,7 @@ Store a new memory for an agent.
   "content": "string",
   "source": "string",
   "force": false,
+  "private": false,
   "metadata": {}
 }
 ```
@@ -191,13 +194,15 @@ Store a new memory for an agent.
 | `content` | ✓ | Text to store |
 | `source` | ✗ | Provenance label |
 | `force` | ✗ | Boolean. If `true`, bypass salience threshold and store unconditionally. Defaults to `false`. |
+| `private` | ✗ | Boolean. If `true`, mark as private — excluded from team consolidation sync. Defaults to `false`. Backends that do not implement privacy SHOULD ignore this field and store the memory as shared. |
 | `metadata` | ✗ | Hints to the backend (e.g. salience, modality). |
 
 **Output**
 ```json
 {
   "id": "string",
-  "status": "stored"
+  "status": "stored",
+  "visibility": "shared"
 }
 ```
 
@@ -235,11 +240,12 @@ Retrieve memories relevant to a query.
   "status": "active | pinned | archived",
   "source": "string",
   "timestamp_after": "ISO 8601 datetime",
-  "timestamp_before": "ISO 8601 datetime"
+  "timestamp_before": "ISO 8601 datetime",
+  "visibility": "private | shared"
 }
 ```
 
-If `filters.status` is absent, backends SHOULD return both `active` and `pinned` memories. `archived` memories MUST NOT appear unless `filters.status` is explicitly set to `"archived"`.
+If `filters.status` is absent, backends SHOULD return both `active` and `pinned` memories. `archived` memories MUST NOT appear unless `filters.status` is explicitly set to `"archived"`. If `filters.visibility` is absent, backends SHOULD return all memories regardless of visibility.
 
 **Output**
 ```json

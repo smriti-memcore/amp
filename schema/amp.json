@@ -35,6 +35,11 @@
           "enum": ["active", "pinned", "archived"],
           "description": "Current lifecycle status of the memory."
         },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "shared"],
+          "description": "Whether this memory is eligible for team consolidation sync. Defaults to 'shared' if absent. Backends that do not implement privacy SHOULD omit this field."
+        },
         "metadata": {
           "type": "object",
           "description": "Backend-specific fields (e.g. salience scores, hop distance, room ID).",
@@ -64,6 +69,11 @@
           "type": "string",
           "format": "date-time",
           "description": "Return only memories created before this time."
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "shared"],
+          "description": "Filter by visibility. If absent, returns all memories regardless of visibility."
         }
       },
       "additionalProperties": false
@@ -110,6 +120,11 @@
             "default": false,
             "description": "If true, bypass salience threshold and store unconditionally."
           },
+          "private": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, mark this memory as private — excluded from team consolidation sync. Backends that do not implement privacy SHOULD ignore this field and store the memory as shared."
+          },
           "metadata": {
             "type": "object",
             "description": "Hints to the backend (e.g. salience scores, modality).",
@@ -130,6 +145,11 @@
             "type": "string",
             "enum": ["stored", "duplicate", "below_threshold"],
             "description": "Outcome of the encode operation."
+          },
+          "visibility": {
+            "type": "string",
+            "enum": ["private", "shared"],
+            "description": "Visibility of the stored memory. Present when status is 'stored'."
           }
         }
       }

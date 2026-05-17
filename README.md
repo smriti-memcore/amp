@@ -15,7 +15,7 @@ AMP is an open specification that defines a standard interface for persistent me
 
 | Verb | Description |
 |------|-------------|
-| `amp.encode` | Store a new memory for an agent |
+| `amp.encode` | Store a new memory for an agent (`private=true` marks it private — excluded from team sync) |
 | `amp.recall` | Retrieve memories relevant to a query |
 | `amp.forget` | Permanently delete a memory |
 | `amp.consolidate` | Trigger backend consolidation/reorganisation |
