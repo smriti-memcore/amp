@@ -458,7 +458,7 @@ smriti-memcore `metadata` in `MemoryResult` includes: `salience` (5-dimensional 
 
 The following design questions are deferred from v1.0 and will be resolved based on community feedback. Open an issue at [github.com/smriti-memcore/amp](https://github.com/smriti-memcore/amp) to contribute.
 
-1. **Multi-agent shared memory** — Should AMP define a mechanism for two agents to share a memory namespace, or is that out of scope for the base protocol?
+1. **Multi-agent shared memory** — Should AMP define a mechanism for two agents to share a memory namespace, or is that out of scope for the base protocol? The `visibility` field (introduced alongside `private=true` on `amp.encode`) provides the data-model foundation: only `visibility=shared` memories are candidates for cross-agent access. The protocol mechanism for that access — shared `agent_id` namespace, explicit grant verb, pull sync, or push-on-encode — remains open.
 2. **Authentication** — Should AMP define a standard agent authentication header, or fully delegate to the MCP transport layer?
 3. **Streaming recall** — Should `amp.recall` support streaming results (useful for large `top_k`) via MCP's streaming tool response?
 4. **Update semantics** — Is the encode-then-forget pattern sufficient for updating a memory, or should AMP define an `amp.update` verb?
