@@ -128,7 +128,19 @@ encode ──→ (below_threshold)    ← rejected; no memory created; no id ret
 
 Every AMP request carries an `agent_id` field. This allows a single backend to serve multiple agents with isolated memory namespaces. Backends MUST enforce namespace isolation: an `amp.recall` for `agent_id: "agent-A"` MUST NOT return memories encoded by `agent_id: "agent-B"` unless the backend explicitly implements a shared memory feature and the caller has opted in. Backends SHOULD create a new namespace implicitly on first `amp.encode` for an unknown `agent_id`; they MUST NOT return an error solely because the namespace is new.
 
-**What is `agent_id`?** AMP intentionally leaves this to the caller. `agent_id` is an opaque, caller-defined string used as a partitioning key — it is not derived from the underlying model, model version, or agent harness. Callers may set it to an application identifier (`"my-app"`), a user session (`"user-42-session"`), a logical agent role (`"research-assistant"`), or anything else meaningful to their system. Upgrading a model or switching harnesses does not automatically change `agent_id` — that is the caller's decision. This deliberate openness means AMP does not define identity semantics; it only enforces that whatever string the caller provides is treated as a consistent namespace. See Open Question #10 for further discussion.
+**What is `agent_id`?** AMP intentionally leaves this to the caller. `agent_id` is an opaque, caller-defined string used as a partitioning key — it is not derived from the underlying model, model version, or agent harness. Callers may set it to an application identifier (`"my-app"`), a user session (`"user-42-session"`), a logical agent role (`"research-assistant"`), or anything else meaningful to their system. Upgrading a model or switching harnesses does not automatically change `agent_id` — that is the caller's decision. This deliberate openness means AMP does not define identity semantics; it only enforces that whatever string the caller provides is treated as a consistent namespace.
+
+**Multi-level namespacing via composite IDs.** AMP does not add separate `user_id`, `session_id`, or `org_id` fields — doing so would force a specific hierarchy on backends that may not want it and would complicate every verb unnecessarily. Instead, callers SHOULD encode hierarchy into `agent_id` directly using a colon-delimited convention:
+
+| Scope | Recommended `agent_id` pattern | Example |
+|---|---|---|
+| Application | `<app>` | `"my-app"` |
+| Per-user | `user:<id>` | `"user:alice"` |
+| Per-team | `team:<id>` | `"team:engineering"` |
+| Per-user per-session | `user:<id>:session:<id>` | `"user:alice:session:abc123"` |
+| Per-agent role | `agent:<role>` | `"agent:research-assistant"` |
+
+Backends MAY parse and act on these segments (e.g. to implement cross-user recall), but MUST treat the full string as the canonical namespace key. Callers that do not need hierarchy MAY use any opaque string.
 
 ### 4.4 Consolidation
 
@@ -466,7 +478,7 @@ The following design questions are deferred from v1.0 and will be resolved based
 6. **Cross-backend memory portability** — Should AMP define a memory export/import format so memories can be migrated between backends?
 7. **Pagination** — Should `amp.recall` support cursor-based pagination for backends with large memory stores, or is `top_k` sufficient?
 8. **Score semantics for exact-match backends** — What should a Core-conformant backend that uses exact-match retrieval return for the `score` field?
-9. **Agent identity semantics** — What should determine an `agent_id`? Should AMP provide conventions (e.g. recommend an application-scoped ID over a model-scoped ID) to avoid interoperability issues when the same logical agent is served by different models or harnesses over time? Alternatively, is the namespace partition itself necessary, or would a single global namespace with per-memory ownership metadata be a simpler design?
+9. **Agent identity semantics** — ~~Resolved in v1.0.~~ `agent_id` is a single opaque caller-defined string; multi-level hierarchy (user, session, org) is encoded via colon-delimited composite IDs by convention (e.g. `user:alice:session:xyz`). AMP does not add separate namespace fields. See §4.3 for the recommended convention table.
 10. **Team / federated memory** — How should individual agent memories be aggregated into a shared team namespace? Should AMP define a sync verb or export format, or is this out of scope for the base protocol?
 
 ---
