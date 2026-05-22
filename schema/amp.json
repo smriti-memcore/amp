@@ -1,13 +1,54 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/agent-memory-protocol/amp/schema/amp.json",
-  "title": "Agent Memory Protocol (AMP) v1.0 — Tool Schemas",
+  "title": "Agent Memory Protocol (AMP) v1.1 — Tool Schemas",
   "description": "JSON Schema definitions for all AMP tool inputs and outputs.",
   "definitions": {
+    "Scope": {
+      "type": "object",
+      "description": "Multi-dimensional partition keys for scoping memory. v1.1 standard.",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "Logical identity of the agent."
+        },
+        "group_id": {
+          "type": "string",
+          "description": "Collaborative group or team identifier."
+        },
+        "workspace_id": {
+          "type": "string",
+          "description": "Shared workspace identifier."
+        },
+        "user_id": {
+          "type": "string",
+          "description": "The end-user interacting with the agent."
+        },
+        "session_id": {
+          "type": "string",
+          "description": "The specific conversation turn, flow, or run (alias: run_id)."
+        },
+        "app_id": {
+          "type": "string",
+          "description": "Specific product surface, app instance, or platform."
+        },
+        "org_id": {
+          "type": "string",
+          "description": "Tenant partition."
+        }
+      },
+      "anyOf": [
+        { "required": ["agent_id"] },
+        { "required": ["group_id"] },
+        { "required": ["workspace_id"] },
+        { "required": ["user_id"] }
+      ],
+      "additionalProperties": false
+    },
     "MemoryResult": {
       "type": "object",
       "description": "Canonical memory object returned in recall responses.",
-      "required": ["id", "content", "score", "timestamp", "status"],
+      "required": ["id", "content", "score", "timestamp", "status", "scope"],
       "properties": {
         "id": {
           "type": "string",
@@ -35,14 +76,61 @@
           "enum": ["active", "pinned", "archived"],
           "description": "Current lifecycle status of the memory."
         },
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        },
         "visibility": {
           "type": "string",
           "enum": ["private", "shared"],
-          "description": "Whether this memory is eligible for team consolidation sync. Defaults to 'shared' if absent. Backends that do not implement privacy SHOULD omit this field."
+          "description": "Deprecated in v1.1. Backward-compatible visibility indicator."
         },
         "metadata": {
           "type": "object",
-          "description": "Backend-specific fields (e.g. salience scores, hop distance, room ID).",
+          "description": "Backend-specific fields. Supports reserved AMP v1.1 metadata keys.",
+          "properties": {
+            "amp.ttl": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Time-to-live in seconds from creation."
+            },
+            "amp.confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0,
+              "description": "System or model confidence score in the validity of the memory."
+            },
+            "amp.entities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Extracted entities related to this memory."
+            },
+            "amp.relations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["subject", "predicate", "object"],
+                "properties": {
+                  "subject": { "type": "string" },
+                  "predicate": { "type": "string" },
+                  "object": { "type": "string" }
+                }
+              },
+              "description": "Subject-Predicate-Object triplets for graph-based stores."
+            },
+            "amp.categories": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Broad classification categories for organizing memories."
+            },
+            "amp.summary": {
+              "type": "string",
+              "description": "A higher-order summarized representation of this memory."
+            }
+          },
           "additionalProperties": true
         }
       }
@@ -100,11 +188,18 @@
       "description": "Store a new memory for an agent.",
       "input": {
         "type": "object",
-        "required": ["agent_id", "content"],
+        "required": ["content"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
         "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
           "agent_id": {
             "type": "string",
-            "description": "Namespace identifier for the calling agent."
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           },
           "content": {
             "type": "string",
@@ -127,7 +222,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "Hints to the backend (e.g. salience scores, modality).",
+            "description": "Hints to the backend (e.g. salience, modality). Supports reserved AMP keys.",
             "additionalProperties": true
           }
         },
@@ -139,17 +234,21 @@
         "properties": {
           "id": {
             "type": "string",
-            "description": "New memory identifier. Present when status is 'stored' or 'duplicate'."
+            "description": "New memory identifier. Present when status is 'stored', 'duplicate', or 'queued'."
           },
           "status": {
             "type": "string",
-            "enum": ["stored", "duplicate", "below_threshold"],
+            "enum": ["stored", "duplicate", "below_threshold", "queued"],
             "description": "Outcome of the encode operation."
           },
           "visibility": {
             "type": "string",
             "enum": ["private", "shared"],
-            "description": "Visibility of the stored memory. Present when status is 'stored'."
+            "description": "Deprecated in v1.1. Backward-compatible visibility echoes."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "Optional async processing/transaction reference for status='queued'."
           }
         }
       }
@@ -158,11 +257,18 @@
       "description": "Retrieve memories relevant to a query.",
       "input": {
         "type": "object",
-        "required": ["agent_id", "query"],
+        "required": ["query"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
         "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
           "agent_id": {
             "type": "string",
-            "description": "Namespace identifier for the calling agent."
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           },
           "query": {
             "type": "string",
@@ -199,11 +305,18 @@
       "description": "Permanently delete a memory.",
       "input": {
         "type": "object",
-        "required": ["agent_id", "id"],
+        "required": ["id"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
         "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
           "agent_id": {
             "type": "string",
-            "description": "Namespace identifier for the calling agent."
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           },
           "id": {
             "type": "string",
@@ -228,11 +341,17 @@
       "description": "Trigger backend consolidation. Full conformance only.",
       "input": {
         "type": "object",
-        "required": ["agent_id"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
         "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
           "agent_id": {
             "type": "string",
-            "description": "Namespace identifier for the calling agent."
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           },
           "depth": {
             "type": "string",
@@ -264,11 +383,18 @@
       "description": "Mark a memory as permanent (never archived by consolidation). Full conformance only.",
       "input": {
         "type": "object",
-        "required": ["agent_id", "id"],
+        "required": ["id"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
         "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
           "agent_id": {
             "type": "string",
-            "description": "Namespace identifier for the calling agent."
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           },
           "id": {
             "type": "string",
@@ -293,11 +419,17 @@
       "description": "Return backend statistics for an agent namespace.",
       "input": {
         "type": "object",
-        "required": ["agent_id"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
         "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
           "agent_id": {
             "type": "string",
-            "description": "Namespace identifier for the calling agent."
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           }
         },
         "additionalProperties": false
@@ -318,7 +450,7 @@
           },
           "metadata": {
             "type": "object",
-            "description": "Backend-specific statistics (e.g. room count, vector store size, last consolidation time).",
+            "description": "Backend-specific statistics. Supports reserved AMP keys.",
             "additionalProperties": true
           }
         }
