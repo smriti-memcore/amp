@@ -82,7 +82,8 @@
         "visibility": {
           "type": "string",
           "enum": ["private", "shared"],
-          "description": "Deprecated in v1.1. Backward-compatible visibility indicator."
+          "deprecated": true,
+          "description": "Deprecated in favor of multi-dimensional scoping in v1.1."
         },
         "metadata": {
           "type": "object",
@@ -144,6 +145,12 @@
           "enum": ["active", "pinned", "archived"],
           "description": "Filter by memory status. If absent, backends SHOULD return active and pinned memories."
         },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "shared"],
+          "deprecated": true,
+          "description": "Deprecated. Filter by visibility."
+        },
         "source": {
           "type": "string",
           "description": "Filter by provenance label."
@@ -201,6 +208,12 @@
             "type": "string",
             "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
           },
+          "private": {
+            "type": "boolean",
+            "default": false,
+            "deprecated": true,
+            "description": "Deprecated in favor of multi-dimensional scoping."
+          },
           "content": {
             "type": "string",
             "minLength": 1,
@@ -244,7 +257,8 @@
           "visibility": {
             "type": "string",
             "enum": ["private", "shared"],
-            "description": "Deprecated in v1.1. Backward-compatible visibility echoes."
+            "deprecated": true,
+            "description": "Deprecated. Echoes back memory visibility."
           },
           "event_id": {
             "type": "string",

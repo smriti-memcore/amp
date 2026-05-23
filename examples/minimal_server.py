@@ -14,7 +14,7 @@ import json
 import sys
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 
 # ── In-memory store ───────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ def _ns(agent_id: str) -> Dict:
     return _store[agent_id]
 
 
-def _encode(agent_id: str, content: str, source: Optional[str] = None, force: bool = False) -> Dict:
+def _encode(agent_id: str, content: str, source: Optional[str] = None, force: bool = False, private: bool = False) -> Dict:
     if not content or not content.strip():
         return {"status": "below_threshold"}
     mem_id = str(uuid.uuid4())
@@ -41,7 +41,8 @@ def _encode(agent_id: str, content: str, source: Optional[str] = None, force: bo
         "score": 1.0,
         "metadata": {},
     }
-    return {"id": mem_id, "status": "stored"}
+    visibility = "private" if private else "shared"
+    return {"id": mem_id, "status": "stored", "visibility": visibility}
 
 
 def _recall(agent_id: str, query: str, top_k: int = 10, filters: Optional[Dict] = None) -> Dict:
@@ -59,7 +60,7 @@ def _recall(agent_id: str, query: str, top_k: int = 10, filters: Optional[Dict] 
                 continue
         score = _score(mem["content"], query_lower)
         if score > 0:
-            results.append({**mem, "score": score})
+            results.append({**mem, "visibility": "shared", "score": score})
     results.sort(key=lambda m: m["score"], reverse=True)
     return {"results": results[:top_k]}
 
@@ -118,6 +119,7 @@ TOOLS = [
                 "content": {"type": "string"},
                 "source": {"type": "string"},
                 "force": {"type": "boolean", "default": False},
+                "private": {"type": "boolean", "default": False},
                 "metadata": {"type": "object"},
             },
         },
@@ -232,6 +234,7 @@ def handle_request(req: Dict) -> Dict:
                 args["content"],
                 args.get("source"),
                 args.get("force", False),
+                args.get("private", False),
             )
             return respond(_tool_result(result))
 

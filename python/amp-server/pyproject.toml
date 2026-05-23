@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "AMP (Agent Memory Protocol) reference server — smriti-memcore backend over MCP"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "mcp>=1.0",
     "smriti-memcore>=1.2.1",

@@ -131,6 +131,7 @@ Backends MUST isolate queries based on the provided scope. If a query provides `
     "agent_id": "assistant-v1",
     "user_id": "user_42"
   },
+  "visibility": "shared", // [DEPRECATED in v1.1]
   "metadata": {
     "amp.confidence": 0.95,
     "amp.entities": ["Alice", "dark mode", "green tea"],
@@ -161,6 +162,7 @@ Store a new memory.
     "content": "string",
     "source": "string",
     "force": false,
+    "private": false, // [DEPRECATED in v1.1]
     "metadata": {}
   }
   ```
@@ -171,6 +173,7 @@ Store a new memory.
   {
     "id": "string",
     "status": "stored | duplicate | below_threshold | queued",
+    "visibility": "shared", // [DEPRECATED in v1.1]
     "event_id": "string"
   }
   ```
@@ -195,6 +198,7 @@ Retrieve relevant memories.
     "top_k": 10,
     "filters": {
       "status": "active | pinned | archived",
+      "visibility": "string", // [DEPRECATED in v1.1]
       "source": "string",
       "timestamp_after": "ISO 8601",
       "timestamp_before": "ISO 8601"
@@ -336,6 +340,20 @@ To resolve the "wild-west" of proprietary metadata formats, AMP v1.1 defines sta
 
 ---
 
+## 5. Backward Compatibility & Deprecations
+
+To ensure seamless integration for legacy client applications built against the AMP v1.0 specification, v1.1 retains two core scoping primitives in a deprecated state. Backward-compatible backends MUST gracefully parse and handle these fields:
+
+1. **`private` (boolean, input parameter to `amp.encode`):**
+   - **Legacy Semantics:** Used to determine whether a memory was private to an agent or shared across the application.
+   - **v1.1 Mapping:** Backends should interpret `private: true` as a directive to scope the memory locally if no explicit `scope` is provided. If `scope` is present, `private` is ignored.
+
+2. **`visibility` (string `["private", "shared"]`, field in `MemoryResult`, `EncodeResponse`, and `RecallFilters`):**
+   - **Legacy Semantics:** Controlled accessibility partitioning.
+   - **v1.1 Mapping:** `MemoryResult` and `EncodeResponse` payloads emitted by v1.1 servers may populate `visibility: "shared"` (or `"private"`) to avoid breaking client-side parser schemas that enforce this property. Likewise, `RecallFilters` gracefully parses `visibility` but ignores it or translates it to scope constraints.
+
+---
+
 ## Appendix A: Memory Exchange Format (MXF)
 
 To eliminate vendor lock-in, AMP v1.1 specifies the **Memory Exchange Format (MXF)**—a canonical migration format. An AMP-compliant backend **SHOULD** provide export/import tools that output/consume MXF files.
@@ -353,3 +371,34 @@ Each row is a valid `MemoryResult` representation with a complete `scope` and `s
 ```
 
 By conforming to this format, a user can instantly backup memories from Claude Dream Mode or Supermemory and restore them into local `smriti-memcore` without data loss or proprietary conversion.
+
+---
+
+## Appendix B: Frequently Asked Questions (FAQ)
+
+### B.1 How do we handle private memories within collaborative scopes in v1.1?
+
+In collaborative workloads (e.g., shared teams, departments, or workspaces), a user can isolate private, non-shareable memories inside a shared partition using two standard patterns:
+
+1. **Intersection-Based Scope Refinement (Recommended):**
+   Combine collaborative scoping keys (such as `workspace_id` or `group_id`) with individual identifying keys (such as `user_id` or `agent_id`) during ingestion. 
+   
+   Because AMP v1.1 backends isolate queries strictly by the intersection of all provided keys, queries made by other users (with different `user_id` values) will naturally exclude these private memories.
+   
+   * *Shared Workspace Memory Scope:* `{"workspace_id": "ws-corporate-finance"}`
+   * *Alice's Private Workspace Memory Scope:* `{"workspace_id": "ws-corporate-finance", "user_id": "user-alice"}`
+
+2. **Harness-Enforced Access Control (Metadata):**
+   Attach access permissions inside the flexible `metadata` JSON bag:
+   ```json
+   {
+     "content": "Personal workspace notes.",
+     "scope": { "workspace_id": "ws-corporate-finance" },
+     "metadata": {
+       "amp.access_level": "private",
+       "amp.owner_id": "user-alice"
+     }
+   }
+   ```
+   The application hosting harness (which manages sessions at the service boundary) intercepts retrieved memories and filters out any records whose metadata restrictions do not match the current active user before injecting context into the LLM prompt.
+

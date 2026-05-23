@@ -16,11 +16,14 @@ import argparse
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
+import mcp.types as types
+from mcp.shared.exceptions import McpError
 from smriti_memcore.core import SMRITI, SmritiConfig
-from smriti_memcore.models import Memory, MemorySource, MemoryStatus
+from smriti_memcore.models import Memory, MemorySource
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +35,30 @@ mcp = FastMCP(
     ),
 )
 
+# Monkeypatch types.Implementation to automatically inject amp_conformance and amp_version fields.
+original_impl_init = types.Implementation.__init__
+
+def custom_impl_init(self, *args, **kwargs):
+    kwargs.setdefault("amp_conformance", "full")
+    kwargs.setdefault("amp_version", "1.1")
+    original_impl_init(self, *args, **kwargs)
+
+types.Implementation.__init__ = custom_impl_init
+
+# Monkeypatch CallToolRequest handler to convert tool errors into standard JSON-RPC level errors with code -32000.
+original_call_tool_handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
+
+async def custom_call_tool_handler(req: types.CallToolRequest) -> types.ServerResult:
+    res = await original_call_tool_handler(req)
+    if hasattr(res, "root") and isinstance(res.root, types.CallToolResult) and res.root.isError:
+        error_message = res.root.content[0].text if res.root.content else "Unknown tool error"
+        raise McpError(types.ErrorData(code=-32000, message=error_message))
+    return res
+
+mcp._mcp_server.request_handlers[types.CallToolRequest] = custom_call_tool_handler
+
 _agents: Dict[str, SMRITI] = {}
+
 _storage_base: str = os.environ.get("AMP_STORAGE_PATH", os.path.expanduser("~/.amp"))
 
 
@@ -56,6 +82,7 @@ def _memory_to_result(memory: Memory, score: Optional[float] = None) -> Dict[str
         "source": source,
         "timestamp": timestamp,
         "status": status,
+        "visibility": "shared",  # Deprecated in v1.1
         "metadata": {
             "salience": memory.salience.composite if memory.salience else None,
             "room_id": getattr(memory, "room_id", None),
@@ -74,6 +101,7 @@ def amp_encode(
     content: str,
     source: str = "direct",
     force: bool = False,
+    private: bool = False,  # Deprecated in v1.1
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not content or not content.strip():
@@ -94,7 +122,8 @@ def amp_encode(
 
     if memory_id is None:
         return {"status": "below_threshold"}
-    return {"id": memory_id, "status": "stored"}
+    visibility = "private" if private else "shared"
+    return {"id": memory_id, "status": "stored", "visibility": visibility}
 
 
 # ── amp.recall ────────────────────────────────────────────────────────────────
@@ -167,8 +196,16 @@ def amp_stats(agent_id: str) -> Dict[str, Any]:
     s = smriti.stats()
     palace = s.get("palace", {})
     episode = s.get("episode_buffer", {})
+    
+    # Calculate active and pinned memories count dynamically
+    memories = smriti.palace.memories.values() if hasattr(smriti.palace, "memories") else []
+    memory_count = sum(
+        1 for m in memories
+        if getattr(m.status, "value", str(m.status)).lower() in ("active", "pinned")
+    )
+
     return {
-        "memory_count": palace.get("memory_count", 0),
+        "memory_count": memory_count,
         "unconsolidated_count": episode.get("unconsolidated", 0),
         "metadata": {
             "room_count": palace.get("room_count", 0),
@@ -177,6 +214,7 @@ def amp_stats(agent_id: str) -> Dict[str, Any]:
             "retrieval": s.get("retrieval", {}),
         },
     }
+
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
