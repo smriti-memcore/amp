@@ -310,6 +310,107 @@ Retrieve counts and backend metrics for a specific partition.
   }
   ```
 
+#### 3.3.4 amp.export
+Stream memories matching the scope as a Memory Exchange Format (MXF) document. The canonical mechanism for backup, migration, and cross-vendor portability. See Appendix A for the wire format.
+
+This verb is **Harness-only** and SHOULD NOT be projected through the MCP Adapter to the LLM unless the host explicitly intends to grant agents bulk-read access. On the REST channel, conforming backends SHOULD stream `application/x-ndjson` rather than buffering the entire export in memory.
+
+**Scope matching semantics.** `amp.export` (and, for consistency, `amp.recall`) match the request `scope` against each stored memory's scope using a **strict AND** rule over the keys the caller provided:
+
+1. Only the keys the caller actually includes in the request `scope` participate in matching. Omitted keys are wildcards (no constraint).
+2. For every key the caller did include, the stored memory's scope MUST contain that same key with an equal value. Missing keys on the stored side do NOT match — a memory stored as `{"agent_id": "bot-a"}` is NOT returned by a query for `{"agent_id": "bot-a", "user_id": "user_1"}`.
+3. Stored memories MAY carry additional scope keys the caller did not specify; those extras do not block the match.
+
+This is the same contract as `amp.recall` and is intentionally conservative: hierarchical queries are easy (`{"org_id": "X"}` returns every memory under org X regardless of agent/user) but no memory ever surfaces in a scope strictly more specific than the one it was stored under. The looser "match if stored scope is a prefix/ancestor of the requested scope" behaviour is intentionally NOT specified; a future minor revision MAY add it behind an explicit `scope_mode` flag.
+
+* **Input:**
+  ```json
+  {
+    "scope": {
+      "agent_id": "string",
+      "user_id": "string"
+    },
+    "filters": {
+      "status": "active",
+      "source": "user_stated",
+      "timestamp_after": "2026-01-01T00:00:00Z"
+    },
+    "page_size": 10000,
+    "cursor": "opaque-continuation-token"
+  }
+  ```
+
+* **Output (MCP adapter channel):**
+  ```json
+  {
+    "ndjson": "{\"id\":\"mem_001\",...}\n{\"id\":\"mem_002\",...}\n",
+    "count": 2,
+    "next_cursor": "opaque-continuation-token"
+  }
+  ```
+
+  When `next_cursor` is present in the response, the caller MUST issue a follow-up `amp.export` call with that token in the input `cursor` field to retrieve the next page. When `next_cursor` is absent (or empty), the export is complete.
+
+* **Output (REST channel):** `application/x-ndjson` stream, one `MemoryResult` row per line. Conformant backends MAY include a final newline-terminated line. The `Content-Length` header SHOULD be omitted for streamed responses; clients MUST parse line-by-line. If pagination is in effect (caller supplied `page_size` or backend chose to chunk), the REST response MUST include an `X-AMP-Next-Cursor` header with the same semantics as the MCP `next_cursor` field.
+
+* **Pagination semantics.** `cursor` is an opaque, backend-defined continuation token. Backends MUST NOT depend on clients parsing it. `page_size` is a HINT — backends MAY emit fewer rows than requested (and SHOULD when memory pressure warrants), but MUST NOT exceed the hint. When `cursor` is omitted, the export starts from the beginning of the deterministic order. The MCP channel MUST cap a single response at a backend-chosen byte limit (recommended ≤ 10 MiB of `ndjson`) and use `next_cursor` to continue; this protects callers from unbounded buffering of multi-gigabyte exports.
+
+* **Conformance:**
+  - Full-conformant backends MUST implement `amp.export`.
+  - Core-conformant backends MAY return `not_supported` (HTTP `501`, JSON-RPC `-32002`).
+  - If `page_size` is absent on the MCP channel, the backend MUST apply its own cap and paginate via `next_cursor`. If `page_size` is absent on the REST channel, the backend MAY stream the entire result set in a single response (the stream itself bounds memory).
+  - Rows MUST appear in deterministic order (recommended: ascending `timestamp`, ties broken by `id`) so that resumable exports are tractable. The same `cursor` issued to the same backend MUST resume at the same position even if new rows were written between calls (new rows MAY appear on a later page after the cursor's position, but MUST NOT cause already-emitted rows to be re-emitted).
+
+#### 3.3.5 amp.import
+Ingest a Memory Exchange Format (MXF) document into the backend under the given scope. Each input line is a `MemoryResult` row. The complement of `amp.export`; together the two verbs define a closed-loop migration contract between conforming backends.
+
+This verb is **Harness-only** and SHOULD NOT be projected through the MCP Adapter to the LLM.
+
+* **Input:**
+  ```json
+  {
+    "scope": {"agent_id": "bot-a", "user_id": "user_1"},
+    "ndjson": "{\"id\":\"mem_001\",\"content\":\"Likes espresso\",...}\n{\"id\":\"mem_002\",...}\n",
+    "on_conflict": "skip",
+    "scope_remap": "strict"
+  }
+  ```
+
+* **`on_conflict` policy (controls how the import responds to a row that cannot be cleanly applied).**
+
+  For `skip` and `overwrite` the trigger is specifically an id collision against an existing row. For `fail_atomic` and `fail_fast` the trigger is ANY row-level failure — id collision, malformed JSON, MemoryResult schema validation failure, or violation of the scope rules below. Callers picking one of the `fail_*` modes are saying "stop on the first thing that doesn't fit," not just "stop on the first id conflict."
+
+  - `skip` *(default)*: on id collision, keep the existing row and count toward `skipped`. Idempotent re-import.
+  - `overwrite`: on id collision, replace the existing row with the incoming one.
+  - `fail_atomic`: abort the entire import on the first row-level failure and roll back every row written so far in the same call. Backends that cannot guarantee atomicity (e.g. no transaction support) MUST return `not_supported` (HTTP `501`, JSON-RPC `-32002`) when this mode is requested — partial commits under a `fail_atomic` label are NOT permitted.
+  - `fail_fast`: abort the import on the first row-level failure but DO NOT roll back. Already-imported rows remain committed; the response reports `imported` count for committed rows plus the failing `line` in `errors[0]`. Use this when partial migration is acceptable and the caller will resume via id-keyed diff.
+
+  *Note:* the v1.1 draft of this spec previously named the abort mode `fail` with implementation-defined rollback. That semantics is replaced by the explicit `fail_atomic` / `fail_fast` pair so callers always know which contract they're getting.
+
+* **`scope_remap` policy (when an incoming row's own scope is a strict subset of the request scope):**
+  - `strict` *(default)*: rows whose `scope` block omits any identity key present in the request `scope` MUST be counted as `failed` with `amp_error_code: "invalid_request"`. This is the safe default — preserves MXF round-trip semantics and prevents an import from silently elevating a memory's scope.
+  - `inherit`: rows with partial scope inherit the missing identity keys from the request `scope`. So a row with `scope: {"agent_id": "bot-a"}` imported into request scope `{"agent_id": "bot-a", "user_id": "user_1"}` becomes a memory in the combined scope. Callers MUST opt into this behaviour explicitly; it changes data ownership and is unsuitable for round-trip migration without intent.
+
+  In both modes, rows whose own `scope` block CONFLICTS with the request `scope` on any key (e.g. row says `agent_id: "bot-b"`, request says `agent_id: "bot-a"`) MUST be counted as `failed` with `amp_error_code: "invalid_request"`. Imports MUST NOT silently cross scope boundaries under either policy.
+
+* **Malformed and schema-invalid rows.** A row that is unparseable JSON, fails `MemoryResult` schema validation, or violates the scope rules above is counted in `failed` with `amp_error_code: "invalid_request"` and a `line` entry; the import continues past it. The only exceptions are `on_conflict: "fail_atomic"` (which rolls back the entire import on the first failure) and `on_conflict: "fail_fast"` (which stops past the failing row but commits everything before it). The HTTP status for a partial-success import is `200`; the response body's `failed` count and `errors` array convey row-level failures. A full-request error (e.g. unparseable request body, missing required field at the request level, invalid scope shape) is a `400` with `AmpErrorData`.
+
+* **Output:**
+  ```json
+  {
+    "imported": 1843,
+    "skipped": 12,
+    "failed": 0,
+    "event_id": "imp_2026-05-25-a1b2c3"
+  }
+  ```
+
+* **Conformance:**
+  - Full-conformant backends MUST implement `amp.import`.
+  - Core-conformant backends MAY return `not_supported` (HTTP `501`, JSON-RPC `-32002`).
+  - Backends that do not support transactions MUST return `not_supported` when `on_conflict: "fail_atomic"` is requested. They MAY support `fail_fast` instead.
+  - The `errors` array MUST be present when `failed > 0`, with at least one entry per failed row; backends MAY truncate to a sensible bound (e.g. first 100 errors).
+
 ---
 
 ### 3.4 Error Handling & Protocol Mappings
@@ -358,7 +459,7 @@ To ensure seamless integration for legacy client applications built against the 
 
 ## Appendix A: Memory Exchange Format (MXF)
 
-To eliminate vendor lock-in, AMP v1.1 specifies the **Memory Exchange Format (MXF)**—a canonical migration format. An AMP-compliant backend **SHOULD** provide export/import tools that output/consume MXF files.
+To eliminate vendor lock-in, AMP v1.1 specifies the **Memory Exchange Format (MXF)** — a canonical migration format. The protocol verbs [`amp.export`](#334-ampexport) and [`amp.import`](#335-ampimport) produce and consume MXF documents respectively; Full-conformant backends MUST implement both. Core-conformant backends MAY return `not_supported` but SHOULD still accept inbound MXF via an out-of-band CLI for one-way migration.
 
 ### A.1 File Structure
 * **Format:** JSON Lines (NDJSON). Each line is a single JSON object.

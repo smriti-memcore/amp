@@ -460,6 +460,145 @@
           }
         }
       }
+    },
+    "amp.export": {
+      "description": "Stream memories for a scope as Memory Exchange Format (MXF). Harness-only system API. See spec Appendix A.",
+      "input": {
+        "type": "object",
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
+          },
+          "filters": {
+            "$ref": "#/definitions/RecallFilters"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Hint for the maximum number of memories to return in this page. Backends MAY emit fewer rows under memory pressure but MUST NOT exceed the hint. If absent on the MCP channel, the backend applies its own cap and uses next_cursor for continuation."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque continuation token returned by a prior amp.export call. When omitted, the export starts from the beginning of the deterministic order."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["count"],
+        "properties": {
+          "ndjson": {
+            "type": "string",
+            "description": "MXF document (NDJSON, one MemoryResult per line). Returned by the MCP adapter channel as a single string. The REST channel SHOULD stream application/x-ndjson instead."
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of MemoryResult rows emitted in this page."
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "Opaque continuation token. When present and non-empty, the caller MUST issue another amp.export call passing this value in cursor to fetch the next page. When absent or empty, the export is complete."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "Optional async processing reference if the backend executes the export asynchronously."
+          }
+        }
+      }
+    },
+    "amp.import": {
+      "description": "Ingest memories from Memory Exchange Format (MXF). Harness-only system API. See spec Appendix A.",
+      "input": {
+        "type": "object",
+        "required": ["ndjson"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "Legacy namespace identifier (mapped to scope.agent_id)."
+          },
+          "ndjson": {
+            "type": "string",
+            "description": "MXF document (NDJSON, one MemoryResult per line). Each row MUST conform to the MemoryResult schema."
+          },
+          "on_conflict": {
+            "type": "string",
+            "enum": ["skip", "overwrite", "fail_atomic", "fail_fast"],
+            "default": "skip",
+            "description": "Policy controlling what happens when a row cannot be cleanly imported. For 'skip' and 'overwrite' the trigger is specifically an id collision (skip = keep existing and increment skipped count; overwrite = replace). For 'fail_atomic' and 'fail_fast' the trigger is ANY row-level failure — id collision, malformed JSON, MemoryResult schema validation failure, or scope rule violation: fail_atomic aborts and rolls back the entire import on the first such failure (backends without transaction support MUST return not_supported); fail_fast aborts on the first failure but DOES NOT roll back already-imported rows (caller resumes via id-keyed diff). The legacy value 'fail' is removed in favor of these two explicit modes."
+          },
+          "scope_remap": {
+            "type": "string",
+            "enum": ["strict", "inherit"],
+            "default": "strict",
+            "description": "Policy when an imported row's own scope omits an identity key present in the top-level request scope. strict (default) = the row is counted as failed with amp_error_code=invalid_request (preserves MXF round-trip semantics, prevents silent scope elevation). inherit = missing identity keys are inherited from the request scope (must be explicitly opted into; changes data ownership). In BOTH modes, rows whose scope CONFLICTS with the request scope on any key are always counted as failed."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["imported", "skipped", "failed"],
+        "properties": {
+          "imported": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows successfully stored as new or overwritten memories."
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows skipped due to existing id conflict (only when on_conflict='skip')."
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows that failed validation or could not be stored."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["line", "amp_error_code", "message"],
+              "properties": {
+                "line": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1-indexed line number of the failed row in the input NDJSON."
+                },
+                "amp_error_code": {
+                  "type": "string",
+                  "enum": ["invalid_request", "backend_error"]
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Per-row failure details. Bounded length; backends MAY truncate."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "Optional async processing reference if the backend executes the import asynchronously."
+          }
+        }
+      }
     }
   }
 }
