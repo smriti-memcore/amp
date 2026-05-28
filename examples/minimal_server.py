@@ -29,6 +29,7 @@ def _ns(agent_id: str) -> Dict:
 
 
 def _encode(agent_id: str, content: str, source: Optional[str] = None, force: bool = False, private: bool = False) -> Dict:
+    # Note: 'private' and 'visibility' are included for v1.0 backwards compatibility testing
     if not content or not content.strip():
         return {"status": "below_threshold"}
     mem_id = str(uuid.uuid4())

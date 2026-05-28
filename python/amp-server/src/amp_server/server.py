@@ -36,6 +36,8 @@ mcp = FastMCP(
 )
 
 # Monkeypatch types.Implementation to automatically inject amp_conformance and amp_version fields.
+# WARNING: Monkeypatching the mcp SDK is brittle and may break in future SDK updates.
+# Consider opening an issue/PR upstream or using a wrapper decorator instead.
 original_impl_init = types.Implementation.__init__
 
 def custom_impl_init(self, *args, **kwargs):
