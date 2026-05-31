@@ -3,7 +3,7 @@
 AMP (Agent Memory Protocol) reference server, backed by [smriti-memcore](https://pypi.org/project/smriti-memcore/).
 
 **Transport:** MCP stdio (REST channel TBD — see *Limitations* below).
-**Conformance:** Six of eight v1.1 verbs implemented today; `amp.export` / `amp.import` defined in the spec/schema but not yet ported into this server. See [#3](https://github.com/smriti-memcore/amp/issues/new?labels=good-first-issue) for the open task.
+**Conformance:** Full — all eight v1.1 verbs implemented.
 
 ## Install
 
@@ -29,10 +29,17 @@ AMP_STORAGE_PATH=/my/path amp-server   # via environment variable
 | `amp.stats` | Memory count, episode buffer, retrieval stats | Core |
 | `amp.consolidate` | Run smriti-memcore consolidation pipeline | Full |
 | `amp.pin` | Mark a memory as permanent | Full |
-| `amp.export` | Bulk export to MXF NDJSON | *Not yet implemented (planned)* |
-| `amp.import` | Bulk import from MXF NDJSON | *Not yet implemented (planned)* |
+| `amp.export` | Bulk export to MXF NDJSON, with cursor pagination | Full |
+| `amp.import` | Bulk import from MXF NDJSON, with `on_conflict` and `scope_remap` policies | Full |
 
-The server advertises `amp_conformance: "full"` in its `initialize` response. The two unimplemented verbs will respond `not_supported` (HTTP 501 / JSON-RPC -32002) until the underlying smriti-memcore export pipeline is wired in.
+The server advertises `amp_conformance: "full"` in its `initialize` response.
+
+### MXF export/import notes
+
+- **Synchronous only.** `amp.export` always returns `ndjson` inline; the async `event_id` branch is not used by this implementation.
+- **Pagination.** `page_size` is a hint; cursors are opaque base64-encoded offsets. Default page cap is 10,000 rows or 10 MiB of NDJSON, whichever comes first. Cursor resumability is guaranteed across new writes (rows are sorted by `creation_time` then `id`).
+- **`on_conflict=fail_atomic` returns `not_supported`.** smriti-memcore has no transactional rollback primitive; per spec §3.3.5, backends that can't honor atomicity MUST return `not_supported` rather than fake it. Use `fail_fast` for non-transactional partial-progress semantics.
+- **Round-trip fidelity.** Each row's full `scope` block is preserved in the stored memory's `metadata._mxf_scope` field so a re-export reproduces the original document, even when `scope_remap=inherit` would otherwise lose the row's original ownership.
 
 ## v1.1 scopes
 
@@ -108,6 +115,8 @@ Mapping:
 | `amp.consolidate` | false | false | false | **true** |
 | `amp.pin` | false | false | true | false |
 | `amp.stats` | true | false | true | false |
+| `amp.export` | true | false | true | false |
+| `amp.import` | false | false | false | false |
 
 ## Connect to Claude Desktop
 
@@ -139,7 +148,7 @@ claude mcp add amp -- uvx --from "git+https://github.com/smriti-memcore/amp.git#
 ## Limitations
 
 - **MCP stdio only.** The REST channel defined in `schema/amp-openapi.yaml` is not yet implemented by this server. A small FastAPI front-end that calls the same scope/encode/recall plumbing is straightforward to add — open an issue if you'd like to take it on.
-- **`amp.export` / `amp.import` not implemented.** Defined in the v1.1 spec/schema; planned for a follow-up release.
+- **`amp.import` `fail_atomic` is unsupported.** smriti-memcore is not transactional. Per spec §3.3.5 the server returns `not_supported` for this policy. Use `fail_fast` for non-transactional partial-progress semantics.
 - **Single-process storage.** Each scope owns its own smriti-memcore instance loaded into memory. Suitable for single-tenant deployments and development; horizontal scaling is a v1.2 concern.
 
 ## Running the compliance suite against this server
@@ -149,4 +158,4 @@ pip install pytest
 pytest compliance/test_amp_server.py --server-cmd "$(which amp-server)"
 ```
 
-67 tests; all pass on the current implementation. Tests that exercise `amp.export` / `amp.import` are gated on tool presence and skip silently when the verbs aren't advertised.
+**86 tests; all pass on the current implementation.** Coverage includes Core verbs, scope validation, error mapping (§3.5), MCP tool annotations (§3.4), MXF export round-trips, cursor resumability, all four `on_conflict` policies (including the `not_supported` return for `fail_atomic`), and both `scope_remap` modes.

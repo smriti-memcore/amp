@@ -64,7 +64,7 @@ Process:
 | Redis Core-conformant backend | Easy | `good-first-issue` |
 | Mem0 / Zep wrapper | Medium | `new-implementation` |
 | Postgres + pgvector Core backend | Medium | `new-implementation` |
-| Add `amp.export` / `amp.import` to `python/amp-server/` | Easy-Medium | `good-first-issue` |
+| Add `amp.export` / `amp.import` to `python/amp-server/` | Done — landed in [PR #6 follow-up](https://github.com/smriti-memcore/amp/pulls?q=is%3Apr+server-export-import) | — |
 | Rewrite `examples/minimal_server.py` to v1.1 native | Easy | `good-first-issue` |
 | FastAPI front-end exposing the REST channel from `python/amp-server/` | Medium | `new-implementation` |
 | TypeScript compliance runner | Medium | `tooling` |

@@ -785,3 +785,349 @@ class TestToolAnnotations:
             assert ann.get("destructiveHint") is False
             assert ann.get("idempotentHint") is False
             assert ann.get("openWorldHint") is False
+
+
+# -- MXF export/import (spec sections 3.3.4 / 3.3.5) -------------------------
+
+def _has_verb(client, verb):
+    """Helper: check whether a verb is advertised. Tests below skip themselves
+    on backends that respond with no tool entry — Core backends are not
+    required to implement export/import."""
+    resp = client._send("tools/list", {})
+    names = {t["name"] for t in resp.get("result", {}).get("tools", [])}
+    return verb in names
+
+
+class TestExportBasic:
+    def test_export_skipped_if_not_advertised(self, client, agent_id):
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("backend does not advertise amp.export (Core conformance OK)")
+
+    def test_export_empty_scope_returns_zero(self, client):
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("amp.export not advertised")
+        # Fresh scope with nothing in it.
+        scope = {"agent_id": f"export-empty-{uuid.uuid4().hex[:8]}"}
+        resp = client.call_tool("amp.export", {"scope": scope})
+        assert "error" not in resp
+        assert resp.get("count") == 0
+        assert resp.get("ndjson") == ""
+        assert "next_cursor" not in resp
+
+    def test_export_emits_ndjson_rows(self, client, agent_id):
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("amp.export not advertised")
+        # Seed three memories.
+        for i in range(3):
+            enc = encode(client, agent_id, f"export seed memory xexp_{uuid.uuid4().hex[:6]} #{i}", force=True)
+            assert enc.get("status") == "stored"
+        resp = client.call_tool("amp.export", {"agent_id": agent_id})
+        assert "error" not in resp
+        assert resp.get("count", 0) >= 3, f"export must return at least the 3 seeded rows: {resp}"
+        ndjson = resp.get("ndjson", "")
+        assert ndjson, "ndjson MUST be present and non-empty when count > 0 (spec section 3.3.4 oneOf)"
+        rows = [json.loads(line) for line in ndjson.rstrip("\n").split("\n") if line.strip()]
+        assert len(rows) == resp["count"], "row count and `count` field must agree"
+        for row in rows:
+            for field in ("id", "content", "score", "timestamp", "status", "scope"):
+                assert field in row, f"MXF row missing required field {field!r}: {row}"
+
+    def test_export_ndjson_field_always_present_sync(self, client, agent_id):
+        """Per spec section 3.3.4 oneOf, a synchronous response MUST have
+        `ndjson` and MUST NOT have `event_id`. The empty-string case is
+        legal when count=0."""
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("amp.export not advertised")
+        resp = client.call_tool("amp.export", {"agent_id": agent_id})
+        assert "ndjson" in resp, "sync export MUST include ndjson per spec section 3.3.4"
+        assert "event_id" not in resp, "sync and async are mutually exclusive per spec section 3.3.4"
+
+    def test_export_respects_page_size(self, client):
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("amp.export not advertised")
+        scope = {"agent_id": f"export-page-{uuid.uuid4().hex[:8]}"}
+        for i in range(5):
+            client.call_tool("amp.encode", {
+                "scope": scope, "content": f"paged memory xpage_{i}_{uuid.uuid4().hex[:6]}", "force": True,
+            })
+        resp = client.call_tool("amp.export", {"scope": scope, "page_size": 2})
+        assert "error" not in resp
+        assert resp.get("count", 0) <= 2, f"page_size cap violated: {resp}"
+        assert resp.get("next_cursor"), "next_cursor MUST be present when more rows remain"
+
+    def test_export_cursor_resumes(self, client):
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("amp.export not advertised")
+        scope = {"agent_id": f"export-cursor-{uuid.uuid4().hex[:8]}"}
+        ids = []
+        for i in range(5):
+            enc = client.call_tool("amp.encode", {
+                "scope": scope, "content": f"cursor memory xcur_{i}_{uuid.uuid4().hex[:6]}", "force": True,
+            })
+            ids.append(enc["id"])
+        seen_ids = []
+        cursor = None
+        for _ in range(10):  # bounded loop
+            args = {"scope": scope, "page_size": 2}
+            if cursor:
+                args["cursor"] = cursor
+            resp = client.call_tool("amp.export", args)
+            assert "error" not in resp
+            page_rows = [json.loads(l) for l in resp.get("ndjson", "").rstrip("\n").split("\n") if l.strip()]
+            seen_ids.extend(r["id"] for r in page_rows)
+            cursor = resp.get("next_cursor")
+            if not cursor:
+                break
+        # Every seeded id must appear exactly once across all pages.
+        for memory_id in ids:
+            assert seen_ids.count(memory_id) == 1, (
+                f"cursor pagination must emit each row exactly once; "
+                f"id={memory_id} count={seen_ids.count(memory_id)}"
+            )
+
+    def test_export_malformed_cursor_returns_invalid_request(self, client, agent_id):
+        if not _has_verb(client, "amp.export"):
+            pytest.skip("amp.export not advertised")
+        resp = client.call_tool("amp.export", {"agent_id": agent_id, "cursor": "this-is-not-a-real-cursor"})
+        assert "error" in resp, "tampered cursor MUST surface as an error"
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request", (
+            f"malformed cursor MUST map to invalid_request per spec section 3.5; got {data!r}"
+        )
+
+
+class TestImportBasic:
+    def test_import_skipped_if_not_advertised(self, client, agent_id):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("backend does not advertise amp.import (Core conformance OK)")
+
+    def test_import_empty_ndjson_returns_zero_counts(self, client, agent_id):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        resp = client.call_tool("amp.import", {"agent_id": agent_id, "ndjson": ""})
+        assert "error" not in resp
+        assert resp.get("imported") == 0
+        assert resp.get("skipped") == 0
+        assert resp.get("failed") == 0
+
+    def test_import_roundtrip_with_export(self, client):
+        """The headline use-case: export from scope A, import into scope B,
+        confirm the rows land in B and are recallable."""
+        if not (_has_verb(client, "amp.import") and _has_verb(client, "amp.export")):
+            pytest.skip("amp.export and amp.import both required")
+        scope_a = {"agent_id": f"rt-src-{uuid.uuid4().hex[:8]}"}
+        scope_b = {"agent_id": f"rt-dst-{uuid.uuid4().hex[:8]}"}
+        token = f"xrt_{uuid.uuid4().hex[:8]}"
+        # Seed source.
+        for i in range(3):
+            client.call_tool("amp.encode", {
+                "scope": scope_a, "content": f"roundtrip memory {token} #{i}", "force": True,
+            })
+        # Export from A.
+        exp = client.call_tool("amp.export", {"scope": scope_a})
+        assert "error" not in exp
+        assert exp["count"] == 3
+        # Re-route the rows: their scope says scope_a, we're importing into scope_b.
+        # That's a conflict under strict mode; rewrite the scope to match the destination.
+        rows = [json.loads(l) for l in exp["ndjson"].rstrip("\n").split("\n") if l.strip()]
+        for row in rows:
+            row["scope"] = scope_b
+        rewritten_ndjson = "\n".join(json.dumps(r) for r in rows) + "\n"
+        # Import into B.
+        imp = client.call_tool("amp.import", {"scope": scope_b, "ndjson": rewritten_ndjson})
+        assert "error" not in imp
+        assert imp["imported"] == 3, f"all 3 rows must import cleanly: {imp}"
+        assert imp["failed"] == 0
+        # Recall from B: must surface the token.
+        rec = client.call_tool("amp.recall", {"scope": scope_b, "query": token})
+        assert "error" not in rec
+        assert len(rec.get("results", [])) >= 3, (
+            f"imported rows must be recallable from destination scope: {rec}"
+        )
+
+    def test_import_skip_is_idempotent(self, client):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        scope = {"agent_id": f"imp-skip-{uuid.uuid4().hex[:8]}"}
+        row = {
+            "id": f"mxf-{uuid.uuid4().hex}",
+            "content": f"idempotent row xidem_{uuid.uuid4().hex[:6]}",
+            "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00",
+            "status": "active",
+            "scope": scope,
+        }
+        ndjson = json.dumps(row) + "\n"
+        first = client.call_tool("amp.import", {"scope": scope, "ndjson": ndjson, "on_conflict": "skip"})
+        assert first["imported"] == 1 and first["skipped"] == 0 and first["failed"] == 0
+        second = client.call_tool("amp.import", {"scope": scope, "ndjson": ndjson, "on_conflict": "skip"})
+        assert second["imported"] == 0, "skip MUST be idempotent on re-import"
+        assert second["skipped"] == 1
+        assert second["failed"] == 0
+
+    def test_import_overwrite_replaces_existing(self, client):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        scope = {"agent_id": f"imp-ow-{uuid.uuid4().hex[:8]}"}
+        memory_id = f"mxf-{uuid.uuid4().hex}"
+        v1 = {
+            "id": memory_id, "content": "version one xov1", "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00", "status": "active", "scope": scope,
+        }
+        v2 = {
+            "id": memory_id, "content": "version two xov2", "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00", "status": "active", "scope": scope,
+        }
+        client.call_tool("amp.import", {"scope": scope, "ndjson": json.dumps(v1) + "\n"})
+        ow = client.call_tool("amp.import", {
+            "scope": scope, "ndjson": json.dumps(v2) + "\n", "on_conflict": "overwrite"
+        })
+        assert "error" not in ow
+        assert ow["imported"] == 1, "overwrite MUST replace, not skip"
+        assert ow["skipped"] == 0
+        # Recall should return the v2 content.
+        rec = client.call_tool("amp.recall", {"scope": scope, "query": "xov2"})
+        contents = [m["content"] for m in rec.get("results", [])]
+        assert any("xov2" in c for c in contents), f"overwrite must produce v2 content; got {contents}"
+
+    def test_import_cross_scope_row_is_failed(self, client):
+        """A row whose scope conflicts with the request scope MUST be counted
+        as failed (invalid_request) under both strict and inherit modes — spec
+        section 3.3.5 strict-AND."""
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        scope_a = {"agent_id": f"imp-conf-a-{uuid.uuid4().hex[:8]}"}
+        scope_b = {"agent_id": f"imp-conf-b-{uuid.uuid4().hex[:8]}"}
+        bad_row = {
+            "id": f"mxf-{uuid.uuid4().hex}",
+            "content": "wrong scope xconflict",
+            "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00",
+            "status": "active",
+            "scope": scope_a,  # row claims A
+        }
+        resp = client.call_tool("amp.import", {
+            "scope": scope_b,                     # request says B
+            "ndjson": json.dumps(bad_row) + "\n",
+        })
+        assert "error" not in resp
+        assert resp["imported"] == 0
+        assert resp["failed"] == 1, "cross-scope row MUST land in failed, not imported"
+        assert resp["errors"][0]["amp_error_code"] == "invalid_request"
+
+    def test_import_malformed_json_line_counted_as_failed(self, client):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        scope = {"agent_id": f"imp-mal-{uuid.uuid4().hex[:8]}"}
+        good_row = {
+            "id": f"mxf-{uuid.uuid4().hex}", "content": "good row xgood", "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00", "status": "active", "scope": scope,
+        }
+        ndjson = json.dumps(good_row) + "\n" + "this is not json\n"
+        resp = client.call_tool("amp.import", {"scope": scope, "ndjson": ndjson})
+        assert "error" not in resp
+        assert resp["imported"] == 1
+        assert resp["failed"] == 1
+        assert resp["errors"][0]["line"] == 2  # 1-indexed
+        assert resp["errors"][0]["amp_error_code"] == "invalid_request"
+
+    def test_import_scope_remap_strict_rejects_partial_row(self, client):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        request_scope = {
+            "agent_id": f"imp-rm-{uuid.uuid4().hex[:8]}",
+            "user_id": "user-42",
+        }
+        # Row carries only agent_id; user_id is missing.
+        partial_row = {
+            "id": f"mxf-{uuid.uuid4().hex}", "content": "partial scope xpart",
+            "score": 0.0, "timestamp": "2026-05-30T12:00:00", "status": "active",
+            "scope": {"agent_id": request_scope["agent_id"]},
+        }
+        resp = client.call_tool("amp.import", {
+            "scope": request_scope,
+            "ndjson": json.dumps(partial_row) + "\n",
+            "scope_remap": "strict",
+        })
+        assert "error" not in resp
+        assert resp["imported"] == 0
+        assert resp["failed"] == 1
+        assert resp["errors"][0]["amp_error_code"] == "invalid_request"
+
+    def test_import_scope_remap_inherit_accepts_partial_row(self, client):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        request_scope = {
+            "agent_id": f"imp-inh-{uuid.uuid4().hex[:8]}",
+            "user_id": "user-43",
+        }
+        partial_row = {
+            "id": f"mxf-{uuid.uuid4().hex}", "content": "inherit scope xinh",
+            "score": 0.0, "timestamp": "2026-05-30T12:00:00", "status": "active",
+            "scope": {"agent_id": request_scope["agent_id"]},
+        }
+        resp = client.call_tool("amp.import", {
+            "scope": request_scope,
+            "ndjson": json.dumps(partial_row) + "\n",
+            "scope_remap": "inherit",
+        })
+        assert "error" not in resp, f"inherit mode MUST accept partial-scope rows: {resp}"
+        assert resp["imported"] == 1
+        assert resp["failed"] == 0
+
+    def test_import_fail_atomic_returns_not_supported_on_nontransactional_backend(self, client, agent_id):
+        """Spec section 3.3.5: backends without transactional rollback MUST
+        return not_supported when fail_atomic is requested. The smriti-memcore
+        reference impl is non-transactional and MUST take this path."""
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        resp = client.call_tool("amp.import", {
+            "agent_id": agent_id,
+            "ndjson": "",
+            "on_conflict": "fail_atomic",
+        })
+        if "error" in resp:
+            data = resp["error"].get("data") or {}
+            # Either not_supported (non-transactional backend) or implementation
+            # actually supports it (transactional backend) — both are conformant.
+            assert data.get("amp_error_code") in ("not_supported",), (
+                f"non-transactional backends MUST return not_supported per spec "
+                f"section 3.3.5; got {data!r}"
+            )
+            assert resp["error"].get("code") == -32002, (
+                f"not_supported MUST map to JSON-RPC -32002 per spec section 3.5; "
+                f"got {resp['error'].get('code')}"
+            )
+
+    def test_import_invalid_on_conflict_is_invalid_request(self, client, agent_id):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        resp = client.call_tool("amp.import", {
+            "agent_id": agent_id, "ndjson": "", "on_conflict": "lolwhat",
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_import_fail_fast_stops_at_first_failure(self, client):
+        if not _has_verb(client, "amp.import"):
+            pytest.skip("amp.import not advertised")
+        scope = {"agent_id": f"imp-ff-{uuid.uuid4().hex[:8]}"}
+        row1 = {
+            "id": f"mxf-{uuid.uuid4().hex}", "content": "first good xff1", "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00", "status": "active", "scope": scope,
+        }
+        row3 = {
+            "id": f"mxf-{uuid.uuid4().hex}", "content": "third good xff3", "score": 0.0,
+            "timestamp": "2026-05-30T12:00:00", "status": "active", "scope": scope,
+        }
+        ndjson = json.dumps(row1) + "\nnot json line 2\n" + json.dumps(row3) + "\n"
+        resp = client.call_tool("amp.import", {
+            "scope": scope, "ndjson": ndjson, "on_conflict": "fail_fast",
+        })
+        assert "error" not in resp
+        # row1 imported, row2 fails, row3 NOT processed (fail_fast aborts).
+        assert resp["imported"] == 1, f"fail_fast must commit row1 before stopping: {resp}"
+        assert resp["failed"] == 1
+        # The remaining row should NOT have been counted as imported/skipped.
+        assert resp["imported"] + resp["skipped"] + resp["failed"] == 2

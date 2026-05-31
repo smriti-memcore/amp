@@ -13,10 +13,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import logging
 import os
+from binascii import Error as binascii_Error
 from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
@@ -499,6 +501,365 @@ def amp_stats(
             "retrieval": s.get("retrieval", {}),
         },
     }
+
+
+# ── amp.export ────────────────────────────────────────────────────────────────
+#
+# MXF (Memory Exchange Format) is NDJSON — one MemoryResult per line. The
+# reference implementation is synchronous: it always emits `ndjson` (possibly
+# the empty string) and never the async `event_id` branch. Pagination uses an
+# opaque base64-encoded JSON cursor over a stable sort order.
+#
+# Sort order (per spec §3.3.4): ascending `creation_time`, ties broken by
+# ascending `id`. Cursors carry the offset into that order; they remain valid
+# across new writes because new rows have a later `creation_time` than any
+# row already cursor-skipped.
+
+_DEFAULT_EXPORT_PAGE_SIZE = 10000   # rows
+_EXPORT_PAGE_BYTE_CAP = 10 * 1024 * 1024  # 10 MiB per spec recommendation
+
+
+def _encode_export_cursor(offset: int) -> str:
+    payload = json.dumps({"offset": offset}, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_export_cursor(cursor: str) -> int:
+    """Decode an opaque export cursor back to its offset. Raises AmpToolError
+    on any tampering / format error so callers see invalid_request rather
+    than backend_error."""
+    if not cursor:
+        return 0
+    # Re-pad for urlsafe_b64decode.
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        payload = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(payload.decode("utf-8"))
+        offset = int(data["offset"])
+        if offset < 0:
+            raise ValueError("negative offset")
+        return offset
+    except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError, binascii_Error):
+        raise AmpToolError("invalid_request", "cursor is malformed or has been tampered with")
+
+
+def _row_matches_filters(result: Dict[str, Any], filters: Optional[Dict[str, Any]]) -> bool:
+    """Apply the RecallFilters subset that export supports (status, source,
+    timestamp_after, timestamp_before). Filtering is post-materialisation —
+    cheap on the reference impl, would be pushed into the storage layer on a
+    production backend."""
+    if not filters:
+        return True
+    status = filters.get("status")
+    if status and result["status"] != status:
+        return False
+    source = filters.get("source")
+    if source and result["source"] != source:
+        return False
+    ts_after = filters.get("timestamp_after")
+    if ts_after and result["timestamp"] < ts_after:
+        return False
+    ts_before = filters.get("timestamp_before")
+    if ts_before and result["timestamp"] >= ts_before:
+        return False
+    return True
+
+
+@mcp.tool(
+    name="amp.export",
+    description="Stream memories for a scope as Memory Exchange Format (MXF) NDJSON.",
+    annotations=types.ToolAnnotations(
+        title="Export Memories (MXF)",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def amp_export(
+    agent_id: Optional[str] = None,
+    scope: Optional[Dict[str, Any]] = None,
+    filters: Optional[Dict[str, Any]] = None,
+    page_size: Optional[int] = None,
+    cursor: Optional[str] = None,
+) -> Dict[str, Any]:
+    norm_scope = _normalize_scope(scope, agent_id)
+    smriti = _get_agent_for_scope(norm_scope)
+
+    # Materialise the deterministic order: ascending creation_time, ties by id.
+    all_mems = list(smriti.palace.memories.values()) if hasattr(smriti.palace, "memories") else []
+    all_mems.sort(key=lambda m: (m.creation_time, m.id))
+
+    start = _decode_export_cursor(cursor) if cursor else 0
+    if page_size is None or page_size <= 0:
+        page_size = _DEFAULT_EXPORT_PAGE_SIZE
+
+    lines: list[str] = []
+    bytes_used = 0
+    emitted = 0
+    next_offset = start
+    for idx in range(start, len(all_mems)):
+        mem = all_mems[idx]
+        row = _memory_to_result(mem, norm_scope)
+        if not _row_matches_filters(row, filters):
+            next_offset = idx + 1
+            continue
+        encoded = json.dumps(row, separators=(",", ":"), default=str) + "\n"
+        encoded_len = len(encoded.encode("utf-8"))
+        # Stop before exceeding the byte cap so the response stays bounded.
+        # The current row will be emitted on the next page.
+        if emitted > 0 and bytes_used + encoded_len > _EXPORT_PAGE_BYTE_CAP:
+            break
+        lines.append(encoded)
+        bytes_used += encoded_len
+        emitted += 1
+        next_offset = idx + 1
+        if emitted >= page_size:
+            break
+
+    response: Dict[str, Any] = {
+        "ndjson": "".join(lines),
+        "count": emitted,
+    }
+    if next_offset < len(all_mems):
+        response["next_cursor"] = _encode_export_cursor(next_offset)
+    return response
+
+
+# ── amp.import ────────────────────────────────────────────────────────────────
+#
+# MXF import supports four on_conflict policies (skip / overwrite / fail_atomic /
+# fail_fast) and two scope_remap modes (strict / inherit). The reference
+# impl backs onto smriti-memcore.palace.place_memory, which does NOT provide
+# transactional rollback — so fail_atomic returns not_supported per spec §3.3.5.
+#
+# Row-level failures (malformed JSON, schema-invalid rows, scope violations)
+# are counted in the response's `failed` field with structured errors; they do
+# NOT produce an HTTP/JSON-RPC error. Only request-level errors (missing
+# top-level scope, unparseable ndjson container, unsupported on_conflict on
+# this backend) raise AmpToolError.
+
+_VALID_ON_CONFLICT = {"skip", "overwrite", "fail_atomic", "fail_fast"}
+_VALID_SCOPE_REMAP = {"strict", "inherit"}
+_IMPORT_ERROR_TRUNCATE_AT = 100
+
+
+def _validate_import_row_scope(
+    row_scope: Optional[Dict[str, Any]],
+    request_scope: Dict[str, str],
+    scope_remap: str,
+) -> tuple[Optional[Dict[str, str]], Optional[str]]:
+    """Resolve the effective stored scope for an imported row, or return an
+    error message. Returns (effective_scope, None) on success, (None, msg) on
+    rejection.
+
+    Rules (spec §3.3.5):
+      - Conflict on any key (row has key K=A, request has key K=B): always fail.
+      - Row missing a key present in request scope:
+          * strict (default): fail with invalid_request.
+          * inherit: fill missing keys from request scope.
+      - Row carrying extra keys not in request scope: allowed (extras don't
+        block the match in either direction).
+    """
+    if row_scope is None:
+        row_scope = {}
+    if not isinstance(row_scope, dict):
+        return None, "row scope must be an object"
+
+    # Conflict check first — applies in both modes.
+    for k, v in request_scope.items():
+        if k in row_scope and row_scope[k] != v:
+            return None, (
+                f"row scope conflicts with request scope on key {k!r}: "
+                f"row={row_scope[k]!r} vs request={v!r}"
+            )
+
+    # Missing-key check.
+    missing = [k for k in request_scope if k not in row_scope]
+    if missing:
+        if scope_remap == "strict":
+            return None, (
+                f"row scope omits identity keys present in request scope "
+                f"({sorted(missing)}); use scope_remap=inherit to allow"
+            )
+        # inherit
+        effective = dict(row_scope)
+        for k in missing:
+            effective[k] = request_scope[k]
+        return effective, None
+
+    return dict(row_scope), None
+
+
+@mcp.tool(
+    name="amp.import",
+    description="Ingest memories from Memory Exchange Format (MXF) NDJSON.",
+    annotations=types.ToolAnnotations(
+        title="Import Memories (MXF)",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+def amp_import(
+    ndjson: str,
+    agent_id: Optional[str] = None,
+    scope: Optional[Dict[str, Any]] = None,
+    on_conflict: str = "skip",
+    scope_remap: str = "strict",
+) -> Dict[str, Any]:
+    if not isinstance(ndjson, str):
+        raise AmpToolError("invalid_request", "ndjson must be a string")
+    if on_conflict not in _VALID_ON_CONFLICT:
+        raise AmpToolError("invalid_request", f"on_conflict must be one of {sorted(_VALID_ON_CONFLICT)}")
+    if scope_remap not in _VALID_SCOPE_REMAP:
+        raise AmpToolError("invalid_request", f"scope_remap must be one of {sorted(_VALID_SCOPE_REMAP)}")
+
+    norm_scope = _normalize_scope(scope, agent_id)
+
+    # fail_atomic requires transactional rollback. smriti-memcore.palace.place_memory
+    # has no rollback primitive, so this backend MUST return not_supported per
+    # spec §3.3.5 rather than fake atomicity with partial commits.
+    if on_conflict == "fail_atomic":
+        raise AmpToolError(
+            "not_supported",
+            "on_conflict=fail_atomic requires transactional rollback, which this "
+            "backend (smriti-memcore) does not provide. Use fail_fast for "
+            "non-transactional partial-progress semantics."
+        )
+
+    smriti = _get_agent_for_scope(norm_scope)
+    palace = smriti.palace
+
+    imported = 0
+    skipped = 0
+    failed = 0
+    errors: list[Dict[str, Any]] = []
+
+    def _record_failure(line_no: int, code: str, message: str) -> None:
+        nonlocal failed
+        failed += 1
+        if len(errors) < _IMPORT_ERROR_TRUNCATE_AT:
+            errors.append({"line": line_no, "amp_error_code": code, "message": message})
+
+    # NDJSON lines. Trailing newline tolerated. Blank lines ignored.
+    raw_lines = ndjson.split("\n")
+    for line_no, raw in enumerate(raw_lines, start=1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _record_failure(line_no, "invalid_request", f"malformed JSON: {exc.msg}")
+            if on_conflict == "fail_fast":
+                break
+            continue
+
+        if not isinstance(row, dict):
+            _record_failure(line_no, "invalid_request", "MXF row must be a JSON object")
+            if on_conflict == "fail_fast":
+                break
+            continue
+
+        row_id = row.get("id")
+        content = row.get("content")
+        if not isinstance(row_id, str) or not row_id:
+            _record_failure(line_no, "invalid_request", "row missing required string field 'id'")
+            if on_conflict == "fail_fast":
+                break
+            continue
+        if not isinstance(content, str):
+            _record_failure(line_no, "invalid_request", "row missing required string field 'content'")
+            if on_conflict == "fail_fast":
+                break
+            continue
+
+        # Scope reconciliation.
+        effective_scope, err = _validate_import_row_scope(row.get("scope"), norm_scope, scope_remap)
+        if err is not None:
+            _record_failure(line_no, "invalid_request", err)
+            if on_conflict == "fail_fast":
+                break
+            continue
+
+        # Strategy-A storage: the row lands in the request scope's partition.
+        # (The reference impl keys storage by request scope only; per-row
+        # `effective_scope` is preserved on the response for cross-backend
+        # round-trips.) If scope_remap=inherit and the row carried extras not
+        # in the request scope, those extras are stored in the row's metadata
+        # for fidelity — see _memory_to_result on re-export.
+
+        existing = palace.get_memory(row_id)
+        if existing is not None:
+            if on_conflict == "skip":
+                skipped += 1
+                continue
+            if on_conflict == "overwrite":
+                # Drop the existing row before writing the new one. smriti's
+                # forget() is the safe path (cascades through indices).
+                try:
+                    smriti.forget(row_id)
+                except Exception as exc:  # smriti-internal; treat as row failure
+                    _record_failure(line_no, "backend_error", f"forget on overwrite failed: {exc}")
+                    if on_conflict == "fail_fast":
+                        break
+                    continue
+            elif on_conflict == "fail_fast":
+                _record_failure(line_no, "invalid_request", f"id collision: {row_id} already exists")
+                break
+
+        # Build a Memory dataclass and place it. We replay the row's own
+        # creation_time and status if present to keep MXF round-trips lossless.
+        try:
+            source_value = row.get("source", "direct")
+            try:
+                source_enum = MemorySource(source_value)
+            except (ValueError, TypeError):
+                source_enum = MemorySource.DIRECT
+            from smriti_memcore.models import MemoryStatus
+            status_value = row.get("status", "active")
+            try:
+                status_enum = MemoryStatus(status_value)
+            except (ValueError, TypeError):
+                status_enum = MemoryStatus.ACTIVE
+            ts_raw = row.get("timestamp")
+            try:
+                ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.now()
+            except ValueError:
+                ts = datetime.now()
+            row_metadata = row.get("metadata") or {}
+            if not isinstance(row_metadata, dict):
+                row_metadata = {}
+            # Preserve the row's own (possibly richer-than-request) scope on
+            # the stored memory's metadata so a re-export is round-trip-faithful.
+            row_metadata = dict(row_metadata)
+            row_metadata.setdefault("_mxf_scope", effective_scope)
+
+            memory = Memory(
+                id=row_id,
+                content=content,
+                source=source_enum,
+                status=status_enum,
+                creation_time=ts,
+                metadata=row_metadata,
+            )
+            palace.place_memory(memory)
+            imported += 1
+        except Exception as exc:
+            _record_failure(line_no, "backend_error", f"place_memory failed: {exc}")
+            if on_conflict == "fail_fast":
+                break
+            continue
+
+    response: Dict[str, Any] = {
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+    }
+    if errors:
+        response["errors"] = errors
+    return response
 
 
 

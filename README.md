@@ -135,7 +135,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 - **Build a conformant backend** — Redis, Mem0/Zep wrapper, Postgres+pgvector. Open a [New Implementation](https://github.com/smriti-memcore/amp/issues/new?template=new-implementation.md) issue.
 - **Improve the compliance suite** — add edge-case tests, port to TypeScript / Go, or write a REST-channel conformance runner (currently MCP-only).
-- **Add `amp.export` / `amp.import` to the reference server** — the verbs are in the schema and spec but not yet implemented in `python/amp-server/`. Well-scoped `good-first-issue`.
+- **Rewrite `examples/minimal_server.py` to v1.1-native** — the current minimal example still teaches v1.0-style flat `agent_id` patterns. A clean Core-conformant rewrite (scope, error mapping, annotations) is tracked as a `good-first-issue`.
 - **Propose a v1.2 feature** — open an issue describing the use case and the proposed API surface; spec-text PRs are gated on at least one prototype implementation.
 
 ## License
