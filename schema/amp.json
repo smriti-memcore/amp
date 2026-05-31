@@ -164,10 +164,34 @@
           "type": "string",
           "format": "date-time",
           "description": "Return only memories created before this time."
+        },
+        "metadata_filters": {
+          "type": "array",
+          "description": "v1.2-draft. Structured predicates over the memory's metadata bag. All entries are combined with strict AND -- a memory MUST satisfy every filter to be returned. Backends MUST treat missing keys and mismatched value types as a filter miss (not a server error). See spec section 3.2.2 for the operator contract.",
+          "items": { "$ref": "#/definitions/MetadataFilter" }
         }
-
       },
       "additionalProperties": false
+    },
+    "MetadataFilter": {
+      "type": "object",
+      "description": "v1.2-draft. A single key-operator-value predicate over a memory's metadata bag. Used inside RecallFilters.metadata_filters[]. Keys are FLAT lookups against the stored metadata object -- dotted strings like 'amp.confidence' are literal keys, not path expressions (a future revision may add path support behind an explicit flag).",
+      "required": ["key", "operator", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Metadata key to evaluate (flat lookup against the stored metadata object). Reserved AMP keys like 'amp.confidence' or 'amp.categories' are addressable directly."
+        },
+        "operator": {
+          "type": "string",
+          "enum": ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"],
+          "description": "Comparison operator. Per-operator value type: eq/ne/gt/gte/lt/lte expect a scalar (string|number|boolean). 'in' expects an array; the row matches when the stored value equals any element. 'contains' expects a scalar; the row matches when the stored value (array OR string) contains that scalar. Backends MUST return invalid_request for any other operator string."
+        },
+        "value": {
+          "description": "Comparison value. Type depends on operator (see operator description). Strings, numbers, booleans, and arrays-of-scalars are the supported shapes; arbitrary nested objects are reserved for a future revision."
+        }
+      }
     },
     "AmpErrorData": {
       "type": "object",
