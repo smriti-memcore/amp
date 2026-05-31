@@ -738,7 +738,7 @@ In collaborative workloads (e.g., shared teams, departments, or workspaces), a u
 
 ## Appendix C: Standalone API Channel Interface Contracts
 
-To standardise deployments using the **Standalone REST/gRPC API Channel** (§1.3), conformant servers and harnesses SHOULD follow the network-interface contract mappings below. v1.1-conformant servers MUST support the v1.1 REST endpoints (six rows below, marked *v1.1*); the rows marked *v1.2-draft* describe routes for verbs proposed in v1.2-draft and are not required for v1.1 conformance.
+To standardise deployments using the **Standalone REST/gRPC API Channel** (§1.3), conformant servers and harnesses SHOULD follow the network-interface contract mappings below. v1.1-conformant servers MUST support the eight v1.1 rows in the table (six Core, marked *v1.1*, plus two Full rows for `amp.export` / `amp.import`); the rows marked *v1.2-draft* describe routes for verbs proposed in v1.2-draft and are not required for v1.1 conformance.
 
 ### C.1 HTTP REST Endpoint Mapping
 
@@ -884,15 +884,22 @@ message StatsResponse {
 
 // v1.2-draft: mutate an existing memory in place. Backends that have
 // not yet implemented amp.update MAY omit this RPC.
+//
+// proto3 `optional` is used on `content` and `metadata_json` so backends can
+// distinguish "field omitted (leave unchanged)" from "field explicitly empty
+// string". Without proto3 presence the wire shape cannot carry the
+// no-op-vs-clear distinction the JSON spec mandates in §3.2.4.
 message UpdateRequest {
-  Scope  scope         = 1;
-  string id            = 2;
-  string content       = 3;  // omit to leave unchanged
-  string metadata_json = 4;  // omit to leave unchanged; backend MAY define merge vs replace
+  Scope  scope                  = 1;
+  string id                     = 2;
+  optional string content       = 3;  // omit to leave unchanged; explicit "" is rejected per §3.2.4
+  optional string metadata_json = 4;  // omit to leave unchanged; JSON-encoded object
+  string metadata_mode          = 5;  // "merge" (default, RFC 7396) | "replace" per §3.2.4
 }
 
 message UpdateResponse {
-  string status = 1;  // updated | not_found | not_supported
+  string id     = 1;  // echoes the input id so callers can correlate by index in pipelined gRPC calls
+  string status = 2;  // updated | no_change | not_found | not_supported (mirrors JSON §3.2.4)
 }
 
 // Service definition exposing the AMP contract over gRPC.
