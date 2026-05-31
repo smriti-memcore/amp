@@ -168,6 +168,7 @@
         "metadata_filters": {
           "type": "array",
           "description": "v1.2-draft. Structured predicates over the memory's metadata bag. All entries are combined with strict AND -- a memory MUST satisfy every filter to be returned. Backends MUST treat missing keys and mismatched value types as a filter miss (not a server error). See spec section 3.2.2 for the operator contract.",
+          "maxItems": 32,
           "items": { "$ref": "#/definitions/MetadataFilter" }
         }
       },
@@ -189,7 +190,22 @@
           "description": "Comparison operator. Per-operator value type: eq/ne/gt/gte/lt/lte expect a scalar (string|number|boolean). 'in' expects an array; the row matches when the stored value equals any element. 'contains' expects a scalar; the row matches when the stored value (array OR string) contains that scalar. Backends MUST return invalid_request for any other operator string."
         },
         "value": {
-          "description": "Comparison value. Type depends on operator (see operator description). Strings, numbers, booleans, and arrays-of-scalars are the supported shapes; arbitrary nested objects are reserved for a future revision."
+          "description": "Comparison value. Per spec §3.2.2.1: scalar (string|number|boolean) for eq/ne/gt/gte/lt/lte/contains; array of scalars for 'in'. null, nested arrays, and nested objects are rejected with invalid_request. (JSON Schema cannot fully express the operator-dependent shape; the reference server enforces both layers — see python/amp-server _validate_metadata_filters.)",
+          "anyOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "boolean" },
+            {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  { "type": "string" },
+                  { "type": "number" },
+                  { "type": "boolean" }
+                ]
+              }
+            }
+          ]
         }
       }
     },
