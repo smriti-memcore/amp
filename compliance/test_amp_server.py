@@ -1365,3 +1365,242 @@ class TestUpdateAnnotations:
         assert ann.get("destructiveHint") is False
         assert ann.get("idempotentHint") is True
         assert ann.get("openWorldHint") is False
+
+
+# -- amp.batch_encode (spec section 3.2.5, v1.2-draft) -----------------------
+
+class TestBatchEncodeBasic:
+    """v1.2-draft amp.batch_encode. Auto-skips on backends that don't advertise it."""
+
+    def test_batch_encode_skipped_if_not_advertised(self, client):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("backend does not advertise amp.batch_encode (v1.2-draft optional)")
+
+    def test_batch_encode_all_succeed(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        entries = [
+            {"content": f"batch row 1 xbat_{uuid.uuid4().hex[:6]}", "force": True},
+            {"content": f"batch row 2 xbat_{uuid.uuid4().hex[:6]}", "force": True},
+            {"content": f"batch row 3 xbat_{uuid.uuid4().hex[:6]}", "force": True},
+        ]
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": entries,
+        })
+        assert "error" not in resp, f"all-succeed batch must not surface a top-level error: {resp}"
+        assert len(resp["results"]) == len(entries), (
+            f"results MUST have length {len(entries)}, got {len(resp['results'])}"
+        )
+        for r in resp["results"]:
+            assert r["status"] == "stored"
+            assert "id" in r
+        summary = resp.get("summary") or {}
+        assert summary.get("stored") == 3
+        assert summary.get("failed") == 0
+
+    def test_batch_encode_empty_array_returns_empty_results(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": [],
+        })
+        assert "error" not in resp
+        assert resp["results"] == []
+
+    def test_batch_encode_mixed_success_and_failure(self, client, agent_id):
+        """Empty content rows MUST land with status=invalid_request in their
+        index slot; the surrounding rows MUST still be stored. Tests the
+        partial-failure contract from spec section 3.2.5."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        token = f"xmix_{uuid.uuid4().hex[:6]}"
+        entries = [
+            {"content": f"good row 0 {token}", "force": True},
+            {"content": ""},  # MUST land in invalid_request
+            {"content": f"good row 2 {token}", "force": True},
+            {"content": None},  # also invalid
+            {"content": f"good row 4 {token}", "force": True},
+        ]
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": entries,
+        })
+        assert "error" not in resp
+        assert len(resp["results"]) == len(entries)
+        assert resp["results"][0]["status"] == "stored"
+        assert resp["results"][1]["status"] == "invalid_request"
+        assert "message" in resp["results"][1]
+        assert resp["results"][2]["status"] == "stored"
+        assert resp["results"][3]["status"] == "invalid_request"
+        assert resp["results"][4]["status"] == "stored"
+        summary = resp["summary"]
+        assert summary["stored"] == 3
+        assert summary["failed"] == 2
+
+    def test_batch_encode_preserves_order(self, client, agent_id):
+        """results[i] MUST correspond to entries[i] for all i. Verified by
+        encoding rows with sentinel content tokens and checking the ids map
+        back to the same indices."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        token = uuid.uuid4().hex[:6]
+        entries = [
+            {"content": f"position {i} sentinel xord_{token}_{i}", "force": True}
+            for i in range(5)
+        ]
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": entries,
+        })
+        assert "error" not in resp
+        # Recall each sentinel and confirm the id from results[i] matches.
+        for i in range(5):
+            rec = client.call_tool("amp.recall", {
+                "agent_id": agent_id, "query": f"xord_{token}_{i}",
+            })
+            results = rec.get("results", [])
+            matched = [m for m in results if f"xord_{token}_{i}" in m.get("content", "")]
+            assert matched, f"position-{i} memory must be recallable; got {results}"
+            assert matched[0]["id"] == resp["results"][i]["id"], (
+                f"order violation at index {i}: batch returned id "
+                f"{resp['results'][i]['id']!r} but recall found {matched[0]['id']!r}"
+            )
+
+    def test_batch_encode_summary_counts_sum_to_length(self, client, agent_id):
+        """Per spec section 3.2.5, the sum of the four summary fields equals
+        results.length."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        entries = [
+            {"content": f"sum check xsum_{uuid.uuid4().hex[:6]}", "force": True}
+            for _ in range(3)
+        ] + [
+            {"content": ""},  # failed
+            {"content": ""},  # failed
+        ]
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": entries,
+        })
+        s = resp["summary"]
+        assert s["stored"] + s["below_threshold"] + s["duplicate"] + s["failed"] == len(resp["results"]), (
+            f"summary counts MUST sum to results.length per spec section 3.2.5: {s} vs {len(resp['results'])}"
+        )
+
+    def test_batch_encode_no_scope_returns_invalid_request(self, client):
+        """Request-level error: missing scope (and missing agent_id) MUST
+        produce an AmpError frame, not a results[] response."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "entries": [{"content": "scopeless"}],
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_batch_encode_non_array_entries_returns_invalid_request(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": "not an array",
+        })
+        assert "error" in resp
+
+    def test_batch_encode_oversize_returns_invalid_request(self, client, agent_id):
+        """Backends MUST reject batches over their maxItems cap with
+        invalid_request. The reference impl caps at 1000."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        # 1001 entries exceeds the schema's maxItems=1000.
+        entries = [{"content": f"oversize row {i}"} for i in range(1001)]
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id, "entries": entries,
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_batch_encode_rows_share_scope(self, client):
+        """All entries in one batch land under the top-level request scope.
+        Recall under the same scope MUST find all stored rows; recall under
+        a different scope MUST NOT."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        scope_a = {"agent_id": f"bat-scope-a-{uuid.uuid4().hex[:8]}"}
+        scope_b = {"agent_id": f"bat-scope-b-{uuid.uuid4().hex[:8]}"}
+        token = f"xshr_{uuid.uuid4().hex[:6]}"
+        resp = client.call_tool("amp.batch_encode", {
+            "scope": scope_a,
+            "entries": [
+                {"content": f"scope share row 1 {token}", "force": True},
+                {"content": f"scope share row 2 {token}", "force": True},
+            ],
+        })
+        assert "error" not in resp
+        # Recall under scope A: rows must be present.
+        rec_a = client.call_tool("amp.recall", {"scope": scope_a, "query": token})
+        found_a = [m for m in rec_a.get("results", []) if token in m.get("content", "")]
+        assert len(found_a) == 2, f"both rows must be recallable under scope A: {found_a}"
+        # Recall under scope B: rows MUST NOT be present.
+        rec_b = client.call_tool("amp.recall", {"scope": scope_b, "query": token})
+        found_b = [m for m in rec_b.get("results", []) if token in m.get("content", "")]
+        assert len(found_b) == 0, f"rows MUST NOT leak across scopes: {found_b}"
+
+    def test_batch_encode_per_row_metadata_persists(self, client, agent_id):
+        """A row's metadata patch MUST land on the stored memory and survive
+        a recall round-trip (verifies the same metadata-persistence path
+        amp.encode uses)."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        token = f"xbme_{uuid.uuid4().hex[:6]}"
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [{
+                "content": f"row with metadata {token}",
+                "force": True,
+                "metadata": {"amp.confidence": 0.77, "tag_b": "beta"},
+            }],
+        })
+        assert resp["results"][0]["status"] == "stored"
+        mem_id = resp["results"][0]["id"]
+        rec = client.call_tool("amp.recall", {"agent_id": agent_id, "query": token})
+        matched = [m for m in rec.get("results", []) if m["id"] == mem_id]
+        assert matched, "row must be recallable"
+        meta = matched[0].get("metadata") or {}
+        assert meta.get("amp.confidence") == 0.77
+        assert meta.get("tag_b") == "beta"
+
+    def test_batch_encode_force_false_can_below_threshold(self, client, agent_id):
+        """A row with force=false (default) and a low-salience content can
+        legitimately come back as below_threshold. Test ensures the per-row
+        status is correctly surfaced rather than being conflated with
+        invalid_request."""
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        # We can't reliably force below_threshold across backends, so we
+        # accept either stored or below_threshold for force=false rows -- the
+        # important assertion is that BOTH are recognised as valid (not
+        # invalid_request).
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [{"content": "the"}],  # very short, low salience
+        })
+        assert "error" not in resp
+        status = resp["results"][0]["status"]
+        assert status in ("stored", "below_threshold"), (
+            f"force=false low-salience row MUST be stored or below_threshold, "
+            f"not invalid_request; got {status}"
+        )
+
+
+class TestBatchEncodeAnnotations:
+    """When advertised, amp.batch_encode MUST publish the section 3.4 annotation values."""
+
+    def test_batch_encode_annotations_match_spec(self, client):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client._send("tools/list", {})
+        tools = {t["name"]: t for t in resp.get("result", {}).get("tools", [])}
+        ann = tools["amp.batch_encode"].get("annotations") or {}
+        assert ann.get("readOnlyHint") is False
+        assert ann.get("destructiveHint") is False
+        assert ann.get("idempotentHint") is False
+        assert ann.get("openWorldHint") is False

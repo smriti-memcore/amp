@@ -292,6 +292,106 @@
         }
       }
     },
+    "amp.batch_encode": {
+      "description": "Store multiple memories in a single network round-trip. All entries are encoded under one shared scope; per-entry failures are reported in the response rather than aborting the batch. Introduced in v1.2-draft.",
+      "annotations": {
+        "title": "Batch Encode Memories",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "input": {
+        "type": "object",
+        "required": ["entries"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "Legacy namespace identifier (mapped to scope.agent_id)."
+          },
+          "entries": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 1000,
+            "description": "Ordered list of memories to encode. Each entry has the same shape as amp.encode input minus the scope keys (which are taken from the top-level scope). Backends MAY enforce a smaller maxItems and MUST reject over-limit requests with invalid_request.",
+            "items": {
+              "type": "object",
+              "required": ["content"],
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text content to store. Empty strings are rejected per-row (status=invalid_request on that row)."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "Provenance label (e.g. user_stated, inferred, external)."
+                },
+                "force": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "If true, bypass salience threshold for THIS row only."
+                },
+                "metadata": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "Per-row metadata patch applied to the new memory. Supports reserved AMP keys."
+                }
+              }
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+          "results": {
+            "type": "array",
+            "description": "Per-row outcomes in the SAME ORDER as the input entries[] array. Length is always equal to entries.length so callers can correlate by index.",
+            "items": {
+              "type": "object",
+              "required": ["status"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "New memory identifier. Present when status is 'stored', 'duplicate', or 'queued'."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["stored", "duplicate", "below_threshold", "queued", "invalid_request", "backend_error"],
+                  "description": "Outcome for this row. 'invalid_request' and 'backend_error' are row-level mirrors of the corresponding amp_error_code values from spec section 3.5; the request itself succeeds (HTTP 200 / no JSON-RPC error) even when some rows have these statuses. Request-level errors (no scope, malformed entries array) raise a normal AmpError frame."
+                },
+                "message": {
+                  "type": "string",
+                  "description": "Human-readable failure detail. Present when status is 'invalid_request' or 'backend_error'."
+                }
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "description": "Aggregate counts across the batch. Sum of all four fields equals results.length.",
+            "required": ["stored", "below_threshold", "duplicate", "failed"],
+            "properties": {
+              "stored": { "type": "integer", "minimum": 0 },
+              "below_threshold": { "type": "integer", "minimum": 0 },
+              "duplicate": { "type": "integer", "minimum": 0 },
+              "failed": { "type": "integer", "minimum": 0, "description": "Sum of rows with status 'invalid_request' or 'backend_error'." }
+            }
+          }
+        }
+      }
+    },
     "amp.recall": {
       "description": "Retrieve memories relevant to a query.",
       "annotations": {

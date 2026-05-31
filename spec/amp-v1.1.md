@@ -283,6 +283,75 @@ This matches the principle of least surprise for a partial-update verb and is wh
   }
   ```
 
+#### 3.2.5 amp.batch_encode *(v1.2-draft)*
+Store multiple memories in a single network round-trip. Eliminates the sequential-roundtrip latency of calling `amp.encode` once per row when the harness has 10–100 facts to ingest after a long session. All entries are encoded under one shared scope; per-entry failures are reported in the response rather than aborting the batch — the headline use case is *"ingest as much as you can, tell me what didn't fit."*
+
+**Conformance.** Introduced in v1.2-draft. v1.1-conformant backends MAY return `not_supported` (HTTP `501`, JSON-RPC `-32002`). v1.2-conformant backends MUST implement it. Cross-partition bulk writes belong to `amp.import`, not `amp.batch_encode` — `batch_encode` is the in-band fast path for one-scope ingestion, `import` is the out-of-band migration path.
+
+**Annotations** (per §3.4 verb table): `readOnlyHint=false`, `destructiveHint=false`, `idempotentHint=false`, `openWorldHint=false`. Not idempotent because each call mints fresh memory ids; mirrors `amp.encode`.
+
+**Per-row scope.** Entries do NOT carry their own scope. All rows in a single `amp.batch_encode` call land under the top-level request `scope`. Callers needing multi-scope bulk writes MUST issue one `batch_encode` call per scope (or fall back to `amp.import` for true cross-scope migration).
+
+**Per-row entry shape.** Each entry is the same shape as `amp.encode` input minus the scope keys: required `content`, optional `source`, `force`, `metadata`. The `private` deprecated parameter is intentionally NOT accepted on batch entries — callers targeting v1.2-draft are also targeting v1.1 scope semantics, so the legacy field has no useful interpretation here.
+
+**Ordering.** `results[]` MUST appear in the same order as the input `entries[]` array, with `len(results) == len(entries)`. Callers correlate row outcomes to inputs by index. Backends MAY process entries in parallel internally but MUST preserve order in the response.
+
+**Partial-failure semantics.** Row-level failures (empty content, source enum mismatch, salience-gate rejection, backend write error) are reported in the corresponding `results[i].status` and do NOT cause the request itself to fail. Per-row status values:
+
+- `stored` — new memory id allocated; included as `results[i].id`.
+- `duplicate` — content already present under the same scope; existing id is echoed.
+- `below_threshold` — salience gate rejected the row (only when `force=false`).
+- `queued` — async ingestion accepted; `results[i].id` may be deferred.
+- `invalid_request` — row was malformed (empty content, etc.). `results[i].message` carries the diagnostic.
+- `backend_error` — backend failed to write THIS row; other rows in the batch were unaffected. `results[i].message` carries the diagnostic.
+
+Request-level errors (missing top-level `scope`, `entries` not an array, batch over the backend's maxItems cap) MUST raise a normal `AmpError` per §3.5 — the whole call fails, no `results[]` returned.
+
+**Size limit.** The JSON Schema caps `entries.maxItems` at 1000 as a sane default. Backends MAY enforce a smaller cap (e.g. for memory-constrained edge deployments) and MUST reject over-limit requests with `invalid_request`. Callers needing higher throughput chunk into multiple `batch_encode` calls. (For truly large ingest — tens of thousands of rows — use `amp.import` instead; it's purpose-built for that volume.)
+
+**Summary block.** The optional `summary` object aggregates per-status counts across the batch — convenient for callers that only care "did anything fail?" without iterating `results[]`. Backends MUST emit `summary` whenever `results[]` has more than zero rows.
+
+* **Input:**
+  ```json
+  {
+    "scope": {
+      "agent_id": "research-bot",
+      "user_id": "user_42"
+    },
+    "entries": [
+      {
+        "content": "User prefers dark mode in the IDE.",
+        "source": "user_stated",
+        "force": true
+      },
+      {
+        "content": "User dislikes notifications after 10pm.",
+        "metadata": {"amp.confidence": 0.85, "amp.categories": ["preference"]}
+      },
+      {
+        "content": ""
+      }
+    ]
+  }
+  ```
+
+* **Output:**
+  ```json
+  {
+    "results": [
+      {"id": "mem_abc123", "status": "stored"},
+      {"id": "mem_def456", "status": "stored"},
+      {"status": "invalid_request", "message": "content cannot be empty"}
+    ],
+    "summary": {
+      "stored": 2,
+      "below_threshold": 0,
+      "duplicate": 0,
+      "failed": 1
+    }
+  }
+  ```
+
 ---
 
 ### 3.3 Harness-Facing APIs (System-Only / Excluded from LLM Adapter)
@@ -478,6 +547,7 @@ Per MCP revision 2025-03-26, every tool declaration carries a `ToolAnnotations` 
 | `amp.export`      | true  | false | true  | false | Read-only bulk dump (Harness-only). Idempotent: the same cursor against the same backend resumes at the same position. |
 | `amp.import`      | false | false | false | false | Mutates store. Not idempotent in the general case — `on_conflict=skip` makes a single MXF document round-trippable, but two distinct documents with overlapping content produce different end-states than the union would. |
 | `amp.update`      | false | false | true  | false | *v1.2-draft.* Mutates the content/metadata of a memory in place. Idempotent because applying the same patch twice produces the same end state. |
+| `amp.batch_encode`| false | false | false | false | *v1.2-draft.* Bulk ingestion under one scope; not idempotent (each row mints a fresh id, mirroring `amp.encode`). |
 
 **Harness-only verbs.** `amp.consolidate`, `amp.stats`, `amp.export`, and `amp.import` are Harness-tier system verbs and SHOULD NOT be projected through the MCP Adapter to the LLM unless the host explicitly grants bulk-read or admin access. The annotations above describe the verbs themselves, not the access policy.
 

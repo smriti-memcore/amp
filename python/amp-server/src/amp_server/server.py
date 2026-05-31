@@ -35,7 +35,7 @@ mcp = FastMCP(
     "amp-server",
     instructions=(
         "AMP (Agent Memory Protocol) Full-conformant memory server. "
-        "Implements amp.encode, amp.recall, amp.forget, amp.consolidate, amp.pin, amp.stats, amp.export, amp.import, amp.update."
+        "Implements amp.encode, amp.recall, amp.forget, amp.consolidate, amp.pin, amp.stats, amp.export, amp.import, amp.update, amp.batch_encode."
     ),
 )
 
@@ -362,6 +362,142 @@ def amp_encode(
     if private is not None:
         response["visibility"] = "private" if private else "shared"
     return response
+
+
+# ── amp.batch_encode ──────────────────────────────────────────────────────────
+#
+# v1.2-draft. Store multiple memories in a single round-trip under one shared
+# scope. Per-entry failures are reported in results[i].status rather than
+# aborting the batch; request-level errors (no scope, malformed entries) raise
+# normal AmpToolError frames.
+#
+# Ordering invariant: results[i] corresponds to entries[i] for all i. Length
+# parity with entries[] is mandatory so callers can correlate by index.
+
+_BATCH_ENCODE_MAX_ENTRIES = 1000  # matches schema maxItems
+
+
+def _encode_single_row(
+    smriti: SMRITI,
+    entry: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Encode one entry. Mirrors amp_encode's body, but instead of raising
+    AmpToolError on row-level problems it returns {"status": "invalid_request",
+    "message": "..."} so the surrounding batch keeps going."""
+    if not isinstance(entry, dict):
+        return {"status": "invalid_request", "message": "entry must be an object"}
+
+    content = entry.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return {
+            "status": "invalid_request",
+            "message": "content must be a non-empty string",
+        }
+
+    source = entry.get("source", "direct")
+    if not isinstance(source, str):
+        return {"status": "invalid_request", "message": "source must be a string"}
+    try:
+        source_enum = MemorySource(source)
+    except ValueError:
+        source_enum = MemorySource.DIRECT
+
+    force = bool(entry.get("force", False))
+    metadata = entry.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return {"status": "invalid_request", "message": "metadata must be an object"}
+
+    try:
+        if force:
+            source_enum = MemorySource.USER_STATED
+            memory_id = smriti.encode(content, source=source_enum, use_llm=False)
+        else:
+            memory_id = smriti.encode(content, source=source_enum, use_llm=True)
+    except Exception as exc:
+        return {"status": "backend_error", "message": f"encode failed: {exc}"}
+
+    if memory_id is None:
+        return {"status": "below_threshold"}
+
+    # Apply per-row metadata to the freshly-stored memory (mirrors amp.encode).
+    if metadata:
+        try:
+            stored = smriti.palace.get_memory(memory_id)
+            if stored is not None:
+                existing = dict(stored.metadata) if isinstance(stored.metadata, dict) else {}
+                existing.update(metadata)
+                stored.metadata = existing
+        except Exception:
+            # Metadata persistence is best-effort; the row is still stored.
+            pass
+
+    return {"id": memory_id, "status": "stored"}
+
+
+@mcp.tool(
+    name="amp.batch_encode",
+    description="Store multiple memories in a single round-trip under one shared scope (v1.2-draft).",
+    annotations=types.ToolAnnotations(
+        title="Batch Encode Memories",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+def amp_batch_encode(
+    entries: list,
+    agent_id: Optional[str] = None,
+    scope: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    # Request-level validation. These raise AmpToolError so the whole call
+    # fails — per spec section 3.2.5, only row-level problems are partial.
+    if not isinstance(entries, list):
+        raise AmpToolError("invalid_request", "entries must be an array")
+    if len(entries) > _BATCH_ENCODE_MAX_ENTRIES:
+        raise AmpToolError(
+            "invalid_request",
+            f"batch size {len(entries)} exceeds maxItems={_BATCH_ENCODE_MAX_ENTRIES}; "
+            f"chunk the request or use amp.import for higher volumes",
+        )
+
+    norm_scope = _normalize_scope(scope, agent_id)
+    smriti = _get_agent_for_scope(norm_scope)
+
+    results: list = []
+    counts = {"stored": 0, "below_threshold": 0, "duplicate": 0, "failed": 0}
+    any_metadata_applied = False
+
+    for entry in entries:
+        outcome = _encode_single_row(smriti, entry)
+        results.append(outcome)
+        status = outcome.get("status", "")
+        if status == "stored":
+            counts["stored"] += 1
+            if isinstance(entry, dict) and entry.get("metadata"):
+                any_metadata_applied = True
+        elif status == "below_threshold":
+            counts["below_threshold"] += 1
+        elif status == "duplicate":
+            counts["duplicate"] += 1
+        elif status in ("invalid_request", "backend_error"):
+            counts["failed"] += 1
+        # 'queued' is not produced by this backend; if a future change adds it,
+        # it falls through without counting toward any bucket — callers should
+        # treat queued + stored together as "successfully accepted".
+
+    # Persist once at the end if any metadata patches were applied; smriti
+    # palace.save is a full snapshot, so amortising the cost over the batch
+    # is the right call.
+    if any_metadata_applied:
+        try:
+            smriti.palace.save()
+        except Exception:
+            # Metadata persistence is best-effort (same as amp.encode); the
+            # rows themselves are stored.
+            pass
+
+    return {"results": results, "summary": counts}
 
 
 # ── amp.recall ────────────────────────────────────────────────────────────────
