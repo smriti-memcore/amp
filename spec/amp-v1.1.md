@@ -249,8 +249,9 @@ Retrieve relevant memories.
 
 **Error surface.** Request-level problems still raise `AmpError`:
 - `operator` not in the eight-element enum above → `invalid_request` (`-32602`).
-- `value` shape doesn't match the operator family (e.g. `operator: "in"` with a non-array `value`) → `invalid_request`.
+- `value` shape doesn't match the operator family — scalar (`string`/`number`/`boolean`) for `eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`contains`; array of scalars for `in`. `null`, nested arrays, and nested objects are forbidden as `value` (or as elements of an `in` array) → `invalid_request`.
 - Missing `key`, `operator`, or `value` field on any entry → `invalid_request`.
+- More than `maxItems` predicates in a single request → `invalid_request`. The schema cap is **32**; backends MAY enforce a lower cap. Recall cost scales as `candidates × predicates`, so an unbounded list is a DoS surface and is treated as a request-level error rather than truncated.
 
 **Composition with v1.1 filters.** `metadata_filters` AND-composes with `status`, `source`, `timestamp_after`/`timestamp_before`, and the deprecated `visibility` filter. The conventional evaluation order is: scope partition → v1.1 filters → metadata_filters → vector-rank top_k, but backends MAY reorder for performance as long as the result set is identical.
 
@@ -297,6 +298,10 @@ This matches the principle of least surprise for a partial-update verb and is wh
 
 **Scope isolation.** Cross-scope updates are rejected as `not_found` (mirroring `amp.forget`), NOT as `invalid_request`. A scope-A caller passing a scope-B id MUST see the same response as if the id never existed — anything else would leak existence information across the partition boundary.
 
+**Transactional durability.** If the backend's durable write fails after the in-memory mutation, the response is `backend_error` (`-32001`) AND the in-memory state MUST be rolled back to the pre-update snapshot. Same-process reads following a `backend_error` MUST observe the original `content` and `metadata`. This avoids the inconsistency window where one caller sees the mutation, a second observes `backend_error`, and the writer believes its change did not land.
+
+**Metadata bag size.** Backends MUST cap the serialized JSON size of the post-merge metadata bag. The reference server caps at 64 KiB; backends MAY enforce a lower cap. A request that would land an oversized bag is rejected with `invalid_request` BEFORE the durable write — never partially applied.
+
 * **Input:**
   ```json
   {
@@ -332,6 +337,14 @@ Store multiple memories in a single network round-trip. Eliminates the sequentia
 **Per-row scope.** Entries do NOT carry their own scope. All rows in a single `amp.batch_encode` call land under the top-level request `scope`. Callers needing multi-scope bulk writes MUST issue one `batch_encode` call per scope (or fall back to `amp.import` for true cross-scope migration).
 
 **Per-row entry shape.** Each entry is the same shape as `amp.encode` input minus the scope keys: required `content`, optional `source`, `force`, `metadata`. The `private` deprecated parameter is intentionally NOT accepted on batch entries — callers targeting v1.2-draft are also targeting v1.1 scope semantics, so the legacy field has no useful interpretation here.
+
+**Per-row strictness.** Backends MUST treat the following as **row-level** `invalid_request` (so the surrounding batch keeps going):
+- Unknown / forbidden keys on an entry (anything outside `content`, `source`, `force`, `metadata`). Notably `scope`, `agent_id`, and the deprecated `private` field MUST NOT be silently dropped — clients passing them probably expect the value to be honoured.
+- `force` not strictly a JSON boolean. Truthy-coercion (`"true"`, `1`, `[]`) MUST NOT be applied because it can silently bypass the salience gate; backends respond with `results[i].status = "invalid_request"`.
+- `source` present but not a member of the published `MemorySource` enum. Silently rewriting an unknown `source` to the default would mask client typos.
+- `metadata` exceeding the reference 64 KiB serialized JSON cap (or whatever lower cap the backend enforces).
+
+**Durable-save honesty.** Backends MAY defer the durable write of per-row metadata patches and snapshot them together at end-of-batch for performance. If that deferred write fails, every row whose durability depends on it MUST be downgraded from `stored` to `backend_error` in `results[]`, AND the `summary` counters MUST reflect the downgrade. Reporting `stored` for a row whose patch did not land would let callers build on a phantom write.
 
 **Ordering.** `results[]` MUST appear in the same order as the input `entries[]` array, with `len(results) == len(entries)`. Callers correlate row outcomes to inputs by index. Backends MAY process entries in parallel internally but MUST preserve order in the response.
 

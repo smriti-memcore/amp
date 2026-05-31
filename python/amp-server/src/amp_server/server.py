@@ -319,6 +319,11 @@ def amp_encode(
         # Below_threshold remains the salience-gate outcome (handled below).
         raise AmpToolError("invalid_request", "content must be a non-empty string")
 
+    # PR G: cap caller-supplied metadata bag size (uniform with batch_encode
+    # / amp.update). Reject the request before we touch the backend.
+    if metadata is not None:
+        _validate_metadata_bag(metadata, field="metadata")
+
     norm_scope = _normalize_scope(scope, agent_id)
     smriti = _get_agent_for_scope(norm_scope)
 
@@ -376,6 +381,41 @@ def amp_encode(
 
 _BATCH_ENCODE_MAX_ENTRIES = 1000  # matches schema maxItems
 
+# v1.2-draft hardening (PR G):
+#   - Allowed per-row keys for amp.batch_encode entries[]. Anything else
+#     (incl. legacy `private`, the request-level `scope`/`agent_id`) is a
+#     row-level invalid_request — clients shouldn't silently think those
+#     were honoured.
+#   - Max serialized JSON size for a metadata bag, enforced uniformly on
+#     amp.encode, amp.update (post-merge), and each amp.batch_encode row.
+_BATCH_ENCODE_ALLOWED_ROW_KEYS = frozenset({"content", "source", "force", "metadata"})
+_METADATA_MAX_BYTES = 64 * 1024  # 64 KiB serialized JSON; backends MAY lower
+
+
+def _validate_metadata_bag(metadata: Any, *, field: str) -> None:
+    """Validate a metadata bag on encode / update / batch row.
+
+    - Must be a dict (or None — caller decides whether to allow None upstream).
+    - Serialized JSON size <= _METADATA_MAX_BYTES.
+    Raises AmpToolError(invalid_request) on violation. Caller pre-checks None.
+    """
+    if metadata is None:
+        return
+    if not isinstance(metadata, dict):
+        raise AmpToolError("invalid_request", f"{field} must be an object")
+    try:
+        encoded = json.dumps(metadata, ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as exc:
+        raise AmpToolError(
+            "invalid_request", f"{field} is not JSON-serialisable: {exc}"
+        ) from None
+    if len(encoded.encode("utf-8")) > _METADATA_MAX_BYTES:
+        raise AmpToolError(
+            "invalid_request",
+            f"{field} exceeds the {_METADATA_MAX_BYTES}-byte serialized cap; "
+            f"split the bag or store the bulk payload out of band",
+        )
+
 
 def _encode_single_row(
     smriti: SMRITI,
@@ -386,6 +426,19 @@ def _encode_single_row(
     "message": "..."} so the surrounding batch keeps going."""
     if not isinstance(entry, dict):
         return {"status": "invalid_request", "message": "entry must be an object"}
+
+    # PR G hardening: reject forbidden / unknown row keys. Spec section 3.2.5
+    # excludes scope/agent_id (request-level) and the deprecated `private`
+    # field; clients passing them probably expected the value to be honoured.
+    extra_keys = set(entry.keys()) - _BATCH_ENCODE_ALLOWED_ROW_KEYS
+    if extra_keys:
+        return {
+            "status": "invalid_request",
+            "message": (
+                f"unsupported per-row key(s): {sorted(extra_keys)}; "
+                f"batch entries accept only {sorted(_BATCH_ENCODE_ALLOWED_ROW_KEYS)}"
+            ),
+        }
 
     content = entry.get("content")
     if not isinstance(content, str) or not content.strip():
@@ -400,12 +453,34 @@ def _encode_single_row(
     try:
         source_enum = MemorySource(source)
     except ValueError:
-        source_enum = MemorySource.DIRECT
+        # PR G fix: invalid source is a row-level invalid_request, not a
+        # silent fall-back to DIRECT — fall-back masked typos.
+        return {
+            "status": "invalid_request",
+            "message": (
+                f"source '{source}' is not a valid MemorySource enum value"
+            ),
+        }
 
-    force = bool(entry.get("force", False))
+    # PR G fix: `force` must be a real bool — bool(...) coerced "false" / 0 /
+    # any truthy string into True and bypassed salience. Reject anything that
+    # isn't strictly bool or omitted.
+    force = entry.get("force", False)
+    if not isinstance(force, bool):
+        return {
+            "status": "invalid_request",
+            "message": "force must be a boolean",
+        }
+
     metadata = entry.get("metadata")
     if metadata is not None and not isinstance(metadata, dict):
         return {"status": "invalid_request", "message": "metadata must be an object"}
+    # PR G: serialized-size cap (uniform with amp.encode / amp.update).
+    if metadata is not None:
+        try:
+            _validate_metadata_bag(metadata, field="metadata")
+        except AmpToolError as exc:
+            return {"status": "invalid_request", "message": exc.message}
 
     try:
         if force:
@@ -420,6 +495,9 @@ def _encode_single_row(
         return {"status": "below_threshold"}
 
     # Apply per-row metadata to the freshly-stored memory (mirrors amp.encode).
+    # PR G: track whether the metadata write succeeded in-memory so the batch
+    # loop knows which rows depend on the deferred palace.save() landing.
+    metadata_applied = False
     if metadata:
         try:
             stored = smriti.palace.get_memory(memory_id)
@@ -427,11 +505,16 @@ def _encode_single_row(
                 existing = dict(stored.metadata) if isinstance(stored.metadata, dict) else {}
                 existing.update(metadata)
                 stored.metadata = existing
+                metadata_applied = True
         except Exception:
-            # Metadata persistence is best-effort; the row is still stored.
+            # In-memory metadata patch failed for this row; the row is
+            # otherwise stored. The batch's deferred save still covers other
+            # rows. We leave status="stored" — the row is in the palace, just
+            # without its metadata bag. Spec section 3.2.5 considers metadata
+            # patches best-effort at this layer.
             pass
 
-    return {"id": memory_id, "status": "stored"}
+    return {"id": memory_id, "status": "stored", "_metadata_applied": metadata_applied}
 
 
 @mcp.tool(
@@ -466,16 +549,19 @@ def amp_batch_encode(
 
     results: list = []
     counts = {"stored": 0, "below_threshold": 0, "duplicate": 0, "failed": 0}
-    any_metadata_applied = False
+    rows_pending_metadata_save: list = []  # indices needing palace.save() to land
 
     for entry in entries:
         outcome = _encode_single_row(smriti, entry)
+        # _metadata_applied is an internal marker — strip it from the wire-level
+        # payload but remember the index so we can downgrade the row's status
+        # if the deferred palace.save() fails.
+        if outcome.pop("_metadata_applied", False):
+            rows_pending_metadata_save.append(len(results))
         results.append(outcome)
         status = outcome.get("status", "")
         if status == "stored":
             counts["stored"] += 1
-            if isinstance(entry, dict) and entry.get("metadata"):
-                any_metadata_applied = True
         elif status == "below_threshold":
             counts["below_threshold"] += 1
         elif status == "duplicate":
@@ -488,14 +574,23 @@ def amp_batch_encode(
 
     # Persist once at the end if any metadata patches were applied; smriti
     # palace.save is a full snapshot, so amortising the cost over the batch
-    # is the right call.
-    if any_metadata_applied:
+    # is the right call. PR G fix: if the snapshot fails, downgrade every
+    # row that depended on it from "stored" to "backend_error" so the
+    # durability claim in results[] matches what's actually on disk.
+    if rows_pending_metadata_save:
         try:
             smriti.palace.save()
-        except Exception:
-            # Metadata persistence is best-effort (same as amp.encode); the
-            # rows themselves are stored.
-            pass
+        except Exception as exc:
+            for idx in rows_pending_metadata_save:
+                # The row was stored in-memory and may even survive in the
+                # palace's in-memory map, but the durable save failed. Honest
+                # answer to the caller is backend_error.
+                results[idx] = {
+                    "status": "backend_error",
+                    "message": f"palace.save failed after row metadata patch: {exc}",
+                }
+                counts["stored"] -= 1
+                counts["failed"] += 1
 
     return {"results": results, "summary": counts}
 
@@ -569,6 +664,21 @@ _METADATA_FILTER_OPERATORS = frozenset(
 _ORDER_OPERATORS = frozenset({"gt", "gte", "lt", "lte"})
 
 
+_METADATA_FILTERS_MAX = 32  # matches schema maxItems; backends MAY lower
+
+
+def _is_filter_scalar(value: Any) -> bool:
+    """A scalar for MetadataFilter.value purposes is a string, number, or bool.
+
+    Excludes None (null), arrays, and objects.
+    """
+    if isinstance(value, bool):
+        return True
+    if value is None:
+        return False
+    return isinstance(value, (str, int, float))
+
+
 def _validate_metadata_filters(filters: Any) -> None:
     """Validate the request-level shape of filters.metadata_filters.
 
@@ -580,6 +690,14 @@ def _validate_metadata_filters(filters: Any) -> None:
         raise AmpToolError(
             "invalid_request",
             "filters.metadata_filters must be an array of MetadataFilter objects",
+        )
+    # PR G: cap predicate count. Recall cost is candidates * filters and an
+    # unbounded predicate list is a DoS surface.
+    if len(filters) > _METADATA_FILTERS_MAX:
+        raise AmpToolError(
+            "invalid_request",
+            f"filters.metadata_filters length {len(filters)} exceeds "
+            f"maxItems={_METADATA_FILTERS_MAX}",
         )
     for idx, entry in enumerate(filters):
         if not isinstance(entry, dict):
@@ -607,18 +725,29 @@ def _validate_metadata_filters(filters: Any) -> None:
                 f"filters.metadata_filters[{idx}].operator '{op}' is not one of "
                 f"{sorted(_METADATA_FILTER_OPERATORS)}",
             )
+        # PR G: strict value-shape validation. Spec §3.2.2.1 allows only
+        # string/number/bool scalars and (for 'in') arrays of those scalars.
+        # null, nested arrays, and nested objects MUST be invalid_request.
         if op == "in":
             if not isinstance(value, list):
                 raise AmpToolError(
                     "invalid_request",
                     f"filters.metadata_filters[{idx}].value must be an array when operator='in'",
                 )
+            for elem_idx, elem in enumerate(value):
+                if not _is_filter_scalar(elem):
+                    raise AmpToolError(
+                        "invalid_request",
+                        f"filters.metadata_filters[{idx}].value[{elem_idx}] must be a "
+                        f"string, number, or boolean (got type {type(elem).__name__})",
+                    )
         else:
-            # eq/ne/gt/gte/lt/lte/contains all want a scalar.
-            if isinstance(value, (list, dict)):
+            # eq/ne/gt/gte/lt/lte/contains: scalar only (no list/dict/null).
+            if not _is_filter_scalar(value):
                 raise AmpToolError(
                     "invalid_request",
-                    f"filters.metadata_filters[{idx}].value must be a scalar when operator='{op}'",
+                    f"filters.metadata_filters[{idx}].value must be a string, number, "
+                    f"or boolean when operator='{op}' (got type {type(value).__name__})",
                 )
 
 
@@ -963,6 +1092,10 @@ def amp_update(
             "invalid_request",
             "metadata_mode must be 'merge' or 'replace'",
         )
+    # PR G: cap the incoming patch's serialized size. The merged result is
+    # bounded further down once we know what the post-merge bag looks like.
+    if metadata is not None:
+        _validate_metadata_bag(metadata, field="metadata")
 
     norm_scope = _normalize_scope(scope, agent_id)
     smriti = _get_agent_for_scope(norm_scope)
@@ -973,14 +1106,19 @@ def amp_update(
         # than invalid_request so existence info doesn't leak across scopes.
         return {"status": "not_found"}
 
-    # Snapshot for change detection.
+    # Snapshot for change detection AND transactional rollback. PR G fix:
+    # palace.save() failure used to leave the mutated bag visible to same-
+    # process reads while reporting backend_error to the caller, contradicting
+    # the durability claim. We now revert the in-memory mutation on save error.
     original_content = memory.content
     original_metadata = dict(memory.metadata) if isinstance(memory.metadata, dict) else {}
 
     mutated = False
+    new_content_value: Optional[str] = None
+    new_metadata_value: Optional[Dict[str, Any]] = None
 
     if content is not None and content != original_content:
-        memory.content = content
+        new_content_value = content
         mutated = True
 
     if metadata is not None:
@@ -989,17 +1127,25 @@ def amp_update(
         else:  # merge
             new_metadata = _apply_merge_patch(original_metadata, metadata)
         if new_metadata != original_metadata:
-            # Direct assignment is safe: Memory is a mutable dataclass and the
-            # palace's in-memory map already references this instance.
-            memory.metadata = new_metadata
+            # Post-merge size check — `replace` is bounded by the incoming patch
+            # already; `merge` can grow the bag beyond either input.
+            _validate_metadata_bag(new_metadata, field="metadata (post-merge)")
+            new_metadata_value = new_metadata
             mutated = True
 
-    # Persist if anything changed. palace.save() is a full snapshot — fine for
-    # the reference impl; production backends would do a targeted write.
     if mutated:
+        # Apply mutations in-memory.
+        if new_content_value is not None:
+            memory.content = new_content_value
+        if new_metadata_value is not None:
+            memory.metadata = new_metadata_value
         try:
             smriti.palace.save()
         except Exception as exc:
+            # PR G: roll back to the snapshot so subsequent same-process reads
+            # see the pre-update state, matching the backend_error response.
+            memory.content = original_content
+            memory.metadata = original_metadata
             raise AmpToolError("backend_error", f"palace.save failed: {exc}")
         return {"status": "updated", "id": id}
 

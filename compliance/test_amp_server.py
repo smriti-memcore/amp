@@ -2129,3 +2129,314 @@ class TestRecallTimestampFilters:
         assert "error" in resp
         data = resp["error"].get("data") or {}
         assert data.get("amp_error_code") == "invalid_request"
+
+
+# ── PR G hardening tests ─────────────────────────────────────────────────────
+
+
+class TestBatchEncodeRowStrictness:
+    """PR G: per-row strictness in amp.batch_encode (spec §3.2.5
+    'Per-row strictness'). Bad rows surface as results[i].status=invalid_request
+    while the request itself still succeeds.
+    """
+
+    def _row_status(self, resp, idx=0):
+        assert "error" not in resp, resp
+        return resp["results"][idx].get("status")
+
+    def test_force_must_be_strict_bool_string_rejected(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {"content": "stricter force xsf string", "force": "true"},
+            ],
+        })
+        assert self._row_status(resp) == "invalid_request", (
+            f"force='true' must NOT be coerced; got {resp['results'][0]}"
+        )
+
+    def test_force_must_be_strict_bool_int_rejected(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {"content": "stricter force xsfi int", "force": 1},
+            ],
+        })
+        assert self._row_status(resp) == "invalid_request", (
+            f"force=1 (int) must NOT be coerced to True; got {resp['results'][0]}"
+        )
+
+    def test_forbidden_per_row_scope_key_rejected(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {
+                    "content": "forbidden scope key xfsk",
+                    "force": True,
+                    "scope": {"agent_id": "other"},
+                },
+            ],
+        })
+        assert self._row_status(resp) == "invalid_request", (
+            "per-row `scope` MUST be rejected, not silently dropped"
+        )
+
+    def test_forbidden_per_row_private_key_rejected(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {
+                    "content": "forbidden private key xfpk",
+                    "force": True,
+                    "private": True,
+                },
+            ],
+        })
+        assert self._row_status(resp) == "invalid_request"
+
+    def test_unknown_row_key_rejected(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {
+                    "content": "unknown row key xurk",
+                    "force": True,
+                    "nonsense_field": 42,
+                },
+            ],
+        })
+        assert self._row_status(resp) == "invalid_request"
+
+    def test_invalid_source_enum_is_row_invalid_request(self, client, agent_id):
+        # Used to silently fall back to MemorySource.DIRECT.
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {
+                    "content": "bad source enum xbse",
+                    "source": "definitely-not-a-valid-source",
+                    "force": True,
+                },
+            ],
+        })
+        assert self._row_status(resp) == "invalid_request"
+
+    def test_mixed_strictness_other_rows_succeed(self, client, agent_id):
+        # Row 0 is bad (string force), row 1 is fine. Both must be reported in order.
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {"content": "mixed row a xmra", "force": "yes"},
+                {"content": "mixed row b xmrb", "force": True},
+            ],
+        })
+        assert "error" not in resp, resp
+        assert len(resp["results"]) == 2
+        assert resp["results"][0]["status"] == "invalid_request"
+        assert resp["results"][1]["status"] == "stored"
+        # Summary must reflect both buckets.
+        summary = resp.get("summary") or {}
+        assert summary.get("failed", 0) >= 1
+        assert summary.get("stored", 0) >= 1
+
+
+class TestMetadataFiltersValueShape:
+    """PR G: strict MetadataFilter.value typing -- null and non-scalar
+    elements rejected as request-level invalid_request.
+    """
+
+    def _assert_invalid_request(self, resp):
+        assert "error" in resp, f"expected error, got {resp}"
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request", (
+            f"expected invalid_request, got {data}"
+        )
+
+    def test_null_value_rejected_for_eq(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "eq", "value": None},
+            ]},
+        })
+        self._assert_invalid_request(resp)
+
+    def test_null_value_rejected_for_in(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "in", "value": None},
+            ]},
+        })
+        self._assert_invalid_request(resp)
+
+    def test_in_with_null_element_rejected(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "in", "value": ["alpha", None]},
+            ]},
+        })
+        self._assert_invalid_request(resp)
+
+    def test_in_with_nested_array_element_rejected(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "in", "value": ["alpha", ["beta"]]},
+            ]},
+        })
+        self._assert_invalid_request(resp)
+
+    def test_in_with_object_element_rejected(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "in", "value": [{"k": "v"}]},
+            ]},
+        })
+        self._assert_invalid_request(resp)
+
+
+class TestMetadataFiltersMaxItems:
+    """PR G: filters.metadata_filters length cap (schema maxItems=32)."""
+
+    def test_more_than_max_is_invalid_request(self, client, agent_id):
+        too_many = [
+            {"key": f"k{i}", "operator": "eq", "value": f"v{i}"}
+            for i in range(33)  # 33 > schema cap of 32
+        ]
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": too_many},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+        msg = (resp["error"].get("message") or "") + " " + (data.get("message") or "")
+        assert "maxItems" in msg or "32" in msg, (
+            f"error message should mention the cap; got {msg}"
+        )
+
+    def test_exactly_max_is_accepted(self, client, agent_id):
+        # 32 predicates against a non-matching key. The recall MUST succeed
+        # (returns whatever rows the backend has, filtered to empty in
+        # practice). The check is that the request itself isn't rejected.
+        many = [
+            {"key": f"never_matches_{i}", "operator": "eq", "value": "x"}
+            for i in range(32)
+        ]
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything xmaxitems",
+            "filters": {"metadata_filters": many},
+        })
+        assert "error" not in resp, resp
+
+
+class TestMetadataBagSizeCap:
+    """PR G: 64 KiB metadata-bag cap on amp.encode / amp.update / amp.batch_encode."""
+
+    def _huge_metadata(self):
+        # ~80 KiB of string content -- comfortably over the 64 KiB cap.
+        big_string = "x" * (80 * 1024)
+        return {"big": big_string}
+
+    def test_encode_rejects_oversized_metadata(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "oversized metadata encode xome",
+            "force": True,
+            "metadata": self._huge_metadata(),
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_update_rejects_oversized_metadata_pre_save(self, client, agent_id):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "oversized metadata update target xomu",
+            "force": True,
+            "metadata": {"keep": "kept"},
+        })
+        assert enc["status"] == "stored"
+        resp = client.call_tool("amp.update", {
+            "agent_id": agent_id,
+            "id": enc["id"],
+            "metadata": self._huge_metadata(),
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+        # And the original bag must be untouched.
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xomu",
+            "top_k": 10,
+        })
+        matched = [r for r in rec["results"] if r["id"] == enc["id"]]
+        assert matched
+        meta = matched[0].get("metadata") or {}
+        assert meta.get("keep") == "kept", "pre-save rejection must leave original bag intact"
+        assert "big" not in meta
+
+    def test_batch_encode_rejects_oversized_row_metadata(self, client, agent_id):
+        if not _has_verb(client, "amp.batch_encode"):
+            pytest.skip("amp.batch_encode not advertised")
+        resp = client.call_tool("amp.batch_encode", {
+            "agent_id": agent_id,
+            "entries": [
+                {
+                    "content": "oversized batch row xobr",
+                    "force": True,
+                    "metadata": self._huge_metadata(),
+                },
+            ],
+        })
+        assert "error" not in resp, resp
+        assert resp["results"][0]["status"] == "invalid_request"
+
+
+class TestUpdateMetadataBagAcceptedUnderCap:
+    """PR G sanity: bags under the cap still encode + update normally."""
+
+    def test_update_just_under_cap_accepted(self, client, agent_id):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "under cap update xucu",
+            "force": True,
+        })
+        assert enc["status"] == "stored"
+        # ~32 KiB string -- under the 64 KiB cap.
+        ok_bag = {"detail": "y" * (32 * 1024)}
+        upd = client.call_tool("amp.update", {
+            "agent_id": agent_id,
+            "id": enc["id"],
+            "metadata": ok_bag,
+        })
+        assert upd["status"] in ("updated", "no_change"), upd
