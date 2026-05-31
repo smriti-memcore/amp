@@ -5,6 +5,18 @@ info:
     Standard RESTful service contract for the Agent Memory Protocol (AMP) v1.1.
     This specification enables application harnesses to integrate with memory backends
     as a robust service layer, independent of the Model Context Protocol (MCP) transport.
+
+    Error model: every non-2xx response body conforms to `ErrorResponse`
+    (`amp_error_code` + `message`). Per spec §3.4, the field name and enum match
+    the JSON Schema `AmpErrorData` definition exactly so the two channels share
+    one wire shape. HTTP status mapping:
+
+    | amp_error_code   | HTTP status |
+    |------------------|-------------|
+    | invalid_request  | 400         |
+    | not_found        | 404         |
+    | not_supported    | 501         |
+    | backend_error    | 500         |
   version: 1.1.0
 servers:
   - url: http://localhost:8000
@@ -33,13 +45,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/EncodeResponse'
         '400':
-          description: Invalid Request format
+          description: Invalid request (missing required fields, invalid scope, etc.)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
-          description: Internal Backend Error
+          description: Internal backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: Backend does not support this operation
           content:
             application/json:
               schema:
@@ -64,7 +82,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/RecallResponse'
         '400':
-          description: Invalid parameters
+          description: Invalid request (missing query, invalid scope, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error
           content:
             application/json:
               schema:
@@ -73,7 +97,14 @@ paths:
   /v1/memories/{id}:
     delete:
       summary: Forget a memory (amp.forget)
-      description: Permanently delete a memory from the store, cascading to all index models and graphs.
+      description: |
+        Permanently delete a memory from the store, cascading to all index
+        models and graphs.
+
+        Scope is passed as a JSON body (DELETE-with-body is valid per
+        RFC 9110 §9.3.5 and is required here because the v1.1 multi-dimensional
+        Scope object does not fit cleanly into a flat query string and must
+        match the MCP channel's structured shape byte-for-byte).
       operationId: forgetMemory
       parameters:
         - name: id
@@ -82,36 +113,12 @@ paths:
           description: Globally unique identifier of the memory
           schema:
             type: string
-        - name: agent_id
-          in: query
-          required: false
-          description: Optional partition key of the agent owning this memory
-          schema:
-            type: string
-        - name: group_id
-          in: query
-          required: false
-          description: Optional partition key of the group owning this memory
-          schema:
-            type: string
-        - name: workspace_id
-          in: query
-          required: false
-          description: Optional partition key of the workspace owning this memory
-          schema:
-            type: string
-        - name: user_id
-          in: query
-          required: false
-          description: Optional partition key of the user owning this memory
-          schema:
-            type: string
-        - name: app_id
-          in: query
-          required: false
-          description: Optional app or platform surface partition key
-          schema:
-            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScopeEnvelope'
       responses:
         '200':
           description: Deletion request outcome
@@ -126,13 +133,19 @@ paths:
                     type: string
                     enum: [forgotten]
         '400':
-          description: Missing query parameter
+          description: Invalid scope (e.g. missing isolating identity key)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Memory not found
+          description: Memory not found under the active scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error
           content:
             application/json:
               schema:
@@ -141,7 +154,9 @@ paths:
   /v1/memories/{id}/pin:
     put:
       summary: Pin a memory (amp.pin)
-      description: Mark a memory as permanent so that background consolidation will never archive it.
+      description: |
+        Mark a memory as permanent so that background consolidation will never
+        archive it. Full-conformance only -- core backends MUST respond 501.
       operationId: pinMemory
       parameters:
         - name: id
@@ -155,23 +170,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                agent_id:
-                  type: string
-                  description: The logical identity of the agent.
-                group_id:
-                  type: string
-                  description: Optional collaborative group identifier.
-                workspace_id:
-                  type: string
-                  description: Optional shared workspace identifier.
-                user_id:
-                  type: string
-                  description: Optional user scope partition.
-                app_id:
-                  type: string
-                  description: Optional app or platform surface partition.
+              $ref: '#/components/schemas/ScopeEnvelope'
       responses:
         '200':
           description: Pin request outcome
@@ -185,14 +184,26 @@ paths:
                   status:
                     type: string
                     enum: [pinned]
+        '400':
+          description: Invalid scope (e.g. missing isolating identity key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Memory not found
+          description: Memory not found under the active scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '501':
-          description: Pinning not supported by backend
+          description: Pinning not supported by backend (core conformance)
           content:
             application/json:
               schema:
@@ -204,6 +215,7 @@ paths:
       description: |
         Trigger background consolidation, summarizing, decaying, and archiving memories.
         This is a harness-only system API and should be scheduled out-of-band by cron loops.
+        Full-conformance only -- core backends MUST respond 501.
       operationId: consolidateMemory
       requestBody:
         required: true
@@ -218,11 +230,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConsolidateResponse'
+        '400':
+          description: Invalid request (e.g. missing isolating identity key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: Consolidation not supported by backend (core conformance)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /v1/memories/stats:
     get:
       summary: Retrieve statistics (amp.stats)
-      description: Fetch metrics, record counts, and engine states for a specific namespace.
+      description: |
+        Fetch metrics, record counts, and engine states for a specific namespace.
+
+        Scope is transported as discrete query parameters on the GET channel
+        (no request body). Per spec §2.3 at least one isolating identity key
+        (`agent_id`, `group_id`, `workspace_id`, or `user_id`) MUST be present
+        in the query string; otherwise the server MUST respond 400.
       operationId: statsMemory
       parameters:
         - name: agent_id
@@ -245,7 +281,17 @@ paths:
           required: false
           schema:
             type: string
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
         - name: app_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: org_id
           in: query
           required: false
           schema:
@@ -257,11 +303,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatsResponse'
+        '400':
+          description: Invalid scope (e.g. missing isolating identity key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
 components:
   schemas:
     Scope:
       type: object
+      description: |
+        Multi-dimensional partition keys (spec §2.3). At least one isolating
+        identity key (`agent_id`, `group_id`, `workspace_id`, or `user_id`)
+        MUST be set. The remaining keys (`session_id`, `app_id`, `org_id`)
+        refine the namespace but do NOT satisfy the at-least-one-isolating-key
+        requirement on their own.
+      minProperties: 1
       properties:
         agent_id:
           type: string
@@ -274,16 +339,38 @@ components:
           description: Shared workspace identifier.
         user_id:
           type: string
-          description: Optional end-user interacting with the agent.
+          description: End-user interacting with the agent.
         session_id:
           type: string
-          description: Optional specific conversation turn or session.
+          description: Specific conversation turn, flow, or run (alias - run_id).
         app_id:
           type: string
-          description: Optional product surface or app surface.
+          description: Product surface, app instance, or platform.
         org_id:
           type: string
-          description: Optional tenant partition.
+          description: Tenant partition.
+      anyOf:
+        - required: [agent_id]
+        - required: [group_id]
+        - required: [workspace_id]
+        - required: [user_id]
+
+    ScopeEnvelope:
+      description: |
+        Request body shape carrying a `scope` object (preferred) or a legacy
+        flat `agent_id` (for v1.0-compat callers). Used by REST endpoints
+        whose only payload is the scope -- DELETE /v1/memories/{id} and
+        PUT /v1/memories/{id}/pin.
+      type: object
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
+      properties:
+        scope:
+          $ref: '#/components/schemas/Scope'
+        agent_id:
+          type: string
+          description: Legacy v1.0 flat identifier (mapped to scope.agent_id).
 
     MemoryResult:
       type: object
@@ -345,12 +432,15 @@ components:
       type: object
       required:
         - content
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
       properties:
         scope:
           $ref: '#/components/schemas/Scope'
         agent_id:
           type: string
-          description: Legacy flat identifier for fallback.
+          description: Legacy flat identifier for v1.0 compatibility (mapped to scope.agent_id).
         content:
           type: string
         source:
@@ -381,45 +471,54 @@ components:
           type: string
           enum: [private, shared]
           deprecated: true
-          description: Deprecated. Echoes back memory visibility.
+          description: Deprecated. Echoed only when the legacy `private` param was supplied.
         event_id:
           type: string
-          description: Optional async transaction or processing event reference for status='queued'.
+          description: |
+            Async processing reference. SHOULD be present when `status` is `queued`
+            so callers can poll or subscribe to the eventual outcome.
 
     RecallRequest:
       type: object
       required:
         - query
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
       properties:
         scope:
           $ref: '#/components/schemas/Scope'
         agent_id:
           type: string
-          description: Legacy flat identifier for fallback.
+          description: Legacy flat identifier for v1.0 compatibility (mapped to scope.agent_id).
         query:
           type: string
         top_k:
           type: integer
           default: 10
         filters:
-          type: object
-          properties:
-            status:
-              type: string
-              enum: [active, pinned, archived]
-            visibility:
-              type: string
-              enum: [private, shared]
-              deprecated: true
-              description: Deprecated. Filter by visibility.
-            source:
-              type: string
-            timestamp_after:
-              type: string
-              format: date-time
-            timestamp_before:
-              type: string
-              format: date-time
+          $ref: '#/components/schemas/RecallFilters'
+
+    RecallFilters:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [active, pinned, archived]
+        visibility:
+          type: string
+          enum: [private, shared]
+          deprecated: true
+          description: Deprecated. Filter by visibility.
+        source:
+          type: string
+        timestamp_after:
+          type: string
+          format: date-time
+        timestamp_before:
+          type: string
+          format: date-time
 
     RecallResponse:
       type: object
@@ -433,12 +532,15 @@ components:
 
     ConsolidateRequest:
       type: object
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
       properties:
         scope:
           $ref: '#/components/schemas/Scope'
         agent_id:
           type: string
-          description: Legacy flat identifier for fallback.
+          description: Legacy flat identifier for v1.0 compatibility (mapped to scope.agent_id).
         depth:
           type: string
           enum: [full, light]
@@ -469,12 +571,16 @@ components:
           additionalProperties: true
 
     ErrorResponse:
+      description: |
+        Wire-compatible alias of the JSON Schema `AmpErrorData` definition
+        (schema/amp.json). The field name `amp_error_code` matches the MCP
+        channel exactly so the two channels share one error shape.
       type: object
       required:
-        - code
+        - amp_error_code
         - message
       properties:
-        code:
+        amp_error_code:
           type: string
           enum: [invalid_request, not_found, not_supported, backend_error]
         message:

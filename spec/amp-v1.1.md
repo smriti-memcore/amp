@@ -112,6 +112,8 @@ AMP v1.1 standardizes the `scope` block, mapping cleanly to leading production e
 * `group_id` (string, optional): Shared team, department, or group of agents.
 * `workspace_id` (string, optional): The collaborative shared workspace partition.
 
+**Isolating vs non-isolating keys.** Only `agent_id`, `group_id`, `workspace_id`, and `user_id` are *isolating* — at least one of them MUST be present in every request scope. `session_id`, `app_id`, and `org_id` are *refining* keys: they narrow the namespace further but do NOT satisfy the at-least-one-isolating-key requirement on their own. A request whose scope contains only refining keys MUST be rejected with `invalid_request` (HTTP 400 / JSON-RPC -32602).
+
 Backends MUST isolate queries based on the provided scope. If a query provides `user_id` and `agent_id`, the backend must only return memories matching both parameters.
 
 ---
@@ -318,7 +320,7 @@ All service-level errors must return a JSON body matching the `AmpErrorData` sch
 
 | AMP Error Code (`amp_error_code`) | JSON-RPC Code | HTTP Status | Description |
 |-----------------------------------|---------------|-------------|-------------|
-| `invalid_request`                 | `-32600` / `-32602` | `400 Bad Request` | Missing required parameters, invalid scope configuration, validation errors, or empty inputs. |
+| `invalid_request`                 | `-32602`      | `400 Bad Request` | Missing required parameters, invalid scope configuration, validation errors, or empty inputs. Backends MAY use `-32600` instead when the inbound JSON-RPC frame itself is malformed at the transport layer (vs a well-formed call with bad params). |
 | `not_found`                       | `-32001`      | `404 Not Found` | The specified memory `id` could not be found under the active scope/partition. |
 | `not_supported`                   | `-32002`      | `501 Not Implemented` | The backend is a lightweight conformance engine and does not support the requested operation (e.g. `consolidate` or `pin`). |
 | `backend_error`                   | `-32000`      | `500 Internal Server Error` | Unhandled database failures, connection dropouts, or downstream API timeouts. |

@@ -464,12 +464,25 @@ class TestMissingRequiredFields:
         resp = client.call_tool("amp.stats", {})
         assert "error" in resp, "amp.stats with missing agent_id must return an error"
 
-    def test_error_code_is_minus_32000(self, client, agent_id):
+    def test_invalid_request_maps_to_minus_32602(self, client, agent_id):
+        """Per spec §3.4, invalid_request → JSON-RPC -32602 (Invalid params).
+
+        Backends may also use -32600 for malformed JSON-RPC frames, but a
+        well-formed call with a missing required parameter is a parameter
+        validation error and so maps to -32602.
+        """
         resp = client.call_tool("amp.encode", {"agent_id": agent_id})  # missing content
-        if "error" in resp:
-            code = resp["error"].get("code")
-            assert code == -32000, \
-                f"AMP errors MUST use JSON-RPC code -32000 (got {code})"
+        assert "error" in resp, "missing required parameter must surface an error"
+        code = resp["error"].get("code")
+        assert code in (-32602, -32600), (
+            f"invalid_request MUST map to JSON-RPC -32602 (or -32600 for transport-level "
+            f"malformed frames); got {code}"
+        )
+        # The structured AMP payload MUST also be present on the data field.
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request", (
+            f"error.data.amp_error_code MUST be 'invalid_request'; got {data!r}"
+        )
 
 
 class TestServerManifest:
@@ -550,3 +563,131 @@ class TestErrorHandling:
                 assert error_data.get("amp_error_code") in (
                     "invalid_request", "backend_error"
                 ), "Error data should contain a valid amp_error_code"
+
+
+# -- v1.1 Scope & Error-Mapping Tests --------------------------------------
+
+class TestScopeValidation:
+    """Coverage for the v1.1 multi-dimensional Scope block (spec section 2.3)."""
+
+    def test_encode_with_scope_object_succeeds(self, client):
+        """A v1.1-native caller passing `scope` (no legacy agent_id) must work."""
+        scope = {"agent_id": f"scope-only-{uuid.uuid4().hex[:8]}"}
+        resp = client.call_tool("amp.encode", {
+            "scope": scope,
+            "content": "scope-object encode path xscope1",
+            "force": True,
+        })
+        assert "error" not in resp, f"scope-only encode must succeed: {resp}"
+        assert resp.get("status") == "stored"
+        assert "id" in resp
+
+    def test_recall_with_scope_object_finds_memory(self, client):
+        """Round-trip: encode under scope X, recall under scope X."""
+        scope = {"agent_id": f"scope-rt-{uuid.uuid4().hex[:8]}"}
+        token = f"xscope_rt_{uuid.uuid4().hex[:8]}"
+        enc = client.call_tool("amp.encode", {
+            "scope": scope, "content": f"scope round trip {token}", "force": True,
+        })
+        assert enc.get("status") == "stored"
+        rec = client.call_tool("amp.recall", {"scope": scope, "query": token})
+        assert "error" not in rec
+        assert any(m.get("id") == enc["id"] for m in rec.get("results", []))
+
+    def test_scope_without_isolating_key_returns_invalid_request(self, client):
+        """Per section 2.3, at least one of {agent_id, group_id, workspace_id, user_id}
+        MUST be present. session_id / app_id / org_id alone are not isolating.
+        """
+        resp = client.call_tool("amp.encode", {
+            "scope": {"session_id": "sess-1", "app_id": "app-1"},
+            "content": "should fail validation",
+        })
+        assert "error" in resp, "scope with only non-isolating keys must fail"
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_no_scope_and_no_agent_id_returns_invalid_request(self, client):
+        resp = client.call_tool("amp.encode", {"content": "scopeless"})
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_scope_isolation(self, client):
+        """A memory stored under scope A MUST NOT be visible under scope B."""
+        scope_a = {"agent_id": f"iso-a-{uuid.uuid4().hex[:8]}"}
+        scope_b = {"agent_id": f"iso-b-{uuid.uuid4().hex[:8]}"}
+        token = f"xiso_{uuid.uuid4().hex[:8]}"
+        enc = client.call_tool("amp.encode", {
+            "scope": scope_a, "content": f"isolated under A {token}", "force": True,
+        })
+        assert enc.get("status") == "stored"
+        rec = client.call_tool("amp.recall", {"scope": scope_b, "query": token})
+        assert all(m.get("id") != enc["id"] for m in rec.get("results", [])), \
+            "scope B must not see memories stored under scope A"
+
+    def test_recall_result_carries_scope_field(self, client):
+        scope = {"agent_id": f"scope-result-{uuid.uuid4().hex[:8]}"}
+        token = f"xresult_{uuid.uuid4().hex[:8]}"
+        enc = client.call_tool("amp.encode", {
+            "scope": scope, "content": f"scope echo {token}", "force": True,
+        })
+        rec = client.call_tool("amp.recall", {"scope": scope, "query": token})
+        matched = [m for m in rec.get("results", []) if m.get("id") == enc["id"]]
+        assert matched, "encoded memory must be retrievable"
+        assert "scope" in matched[0], \
+            "MemoryResult MUST carry a 'scope' field (spec section 3.3.2 / MemoryResult schema)"
+
+
+class TestErrorMapping:
+    """Spec section 3.4 -- strict 1:1 mapping between amp_error_code and JSON-RPC code."""
+
+    def test_not_found_returned_as_status_or_minus_32001(self, client, agent_id):
+        resp = client.call_tool("amp.forget", {"agent_id": agent_id, "id": "does-not-exist"})
+        assert resp.get("status") == "not_found" or (
+            "error" in resp and resp["error"].get("code") == -32001
+        ), f"missing id must return status=not_found or JSON-RPC -32001; got {resp}"
+
+    def test_error_data_carries_amp_error_code(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {"agent_id": agent_id})  # missing content
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert "amp_error_code" in data, \
+            f"error.data must include amp_error_code per section 3.4; got data={data!r}"
+        assert data["amp_error_code"] in (
+            "invalid_request", "not_found", "not_supported", "backend_error"
+        )
+
+
+class TestDeprecatedVisibilityEcho:
+    """Spec section 5 -- deprecated `private`/`visibility` fields are echoed only when
+    the legacy parameter is actually supplied. v1.1-native callers should
+    receive responses free of deprecated noise."""
+
+    def test_v11_native_response_omits_visibility(self, client, agent_id):
+        resp = encode(client, agent_id, "no-visibility echo test xvis1", force=True)
+        assert resp.get("status") == "stored"
+        assert "visibility" not in resp, (
+            "v1.1-native encode (no `private` param) MUST NOT echo deprecated visibility"
+        )
+
+    def test_legacy_private_true_echoes_private_visibility(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "legacy private echo xvis2",
+            "private": True,
+            "force": True,
+        })
+        assert resp.get("status") == "stored"
+        assert resp.get("visibility") == "private", (
+            "legacy `private: true` must round-trip as visibility='private' per section 5"
+        )
+
+    def test_legacy_private_false_echoes_shared_visibility(self, client, agent_id):
+        resp = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "legacy shared echo xvis3",
+            "private": False,
+            "force": True,
+        })
+        assert resp.get("status") == "stored"
+        assert resp.get("visibility") == "shared"
