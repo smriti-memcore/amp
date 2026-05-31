@@ -532,6 +532,13 @@
     },
     "amp.export": {
       "description": "Stream memories for a scope as Memory Exchange Format (MXF). Harness-only system API. See spec Appendix A.",
+      "annotations": {
+        "title": "Export Memories (MXF)",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "anyOf": [
@@ -599,6 +606,13 @@
     },
     "amp.import": {
       "description": "Ingest memories from Memory Exchange Format (MXF). Harness-only system API. See spec Appendix A.",
+      "annotations": {
+        "title": "Import Memories (MXF)",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "required": ["ndjson"],
