@@ -184,11 +184,45 @@
           "description": "Human-readable error description."
         }
       }
+    },
+    "ToolAnnotations": {
+      "type": "object",
+      "description": "MCP 2025-03-26 tool annotations. Hints to hosts about the tool's behaviour so they can apply appropriate gating (e.g. require user confirmation for destructive verbs, cache results from read-only ones). Per the MCP spec these are HINTS, not guarantees -- backends MUST still enforce real semantics server-side.",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Human-readable display name for UIs that surface tool catalogs."
+        },
+        "readOnlyHint": {
+          "type": "boolean",
+          "description": "true if the tool does not modify any backend state. Recall and stats are readOnly; encode/forget/consolidate/pin/import are not."
+        },
+        "destructiveHint": {
+          "type": "boolean",
+          "description": "true if the tool can delete or destroy data. Only amp.forget is destructive; pin/consolidate/encode merely add or annotate."
+        },
+        "idempotentHint": {
+          "type": "boolean",
+          "description": "true if calling the tool repeatedly with the same arguments produces the same effect as calling it once. recall/forget/pin/stats are idempotent; encode is not (each call produces a new memory id); consolidate is not (each pass mutates differently)."
+        },
+        "openWorldHint": {
+          "type": "boolean",
+          "description": "true if the tool's outputs depend on state outside the immediate scope/partition -- e.g. clock time, external services, cross-partition graph state. amp.consolidate is openWorld (mutates an evolving graph and may pull external embeddings)."
+        }
+      }
     }
   },
   "tools": {
     "amp.encode": {
       "description": "Store a new memory for an agent.",
+      "annotations": {
+        "title": "Encode Memory",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "required": ["content"],
@@ -260,6 +294,13 @@
     },
     "amp.recall": {
       "description": "Retrieve memories relevant to a query.",
+      "annotations": {
+        "title": "Recall Memories",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "required": ["query"],
@@ -308,6 +349,13 @@
     },
     "amp.forget": {
       "description": "Permanently delete a memory.",
+      "annotations": {
+        "title": "Forget Memory",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "required": ["id"],
@@ -344,6 +392,13 @@
     },
     "amp.consolidate": {
       "description": "Trigger backend consolidation. Full conformance only.",
+      "annotations": {
+        "title": "Consolidate Memories",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
       "input": {
         "type": "object",
         "anyOf": [
@@ -386,6 +441,13 @@
     },
     "amp.pin": {
       "description": "Mark a memory as permanent (never archived by consolidation). Full conformance only.",
+      "annotations": {
+        "title": "Pin Memory",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "required": ["id"],
@@ -422,6 +484,13 @@
     },
     "amp.stats": {
       "description": "Return backend statistics for an agent namespace.",
+      "annotations": {
+        "title": "Backend Statistics",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
       "input": {
         "type": "object",
         "anyOf": [
