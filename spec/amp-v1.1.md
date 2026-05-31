@@ -383,6 +383,8 @@ This verb is **Harness-only** and SHOULD NOT be projected through the MCP Adapte
   - `skip` *(default)*: on id collision, keep the existing row and count toward `skipped`. Idempotent re-import.
   - `overwrite`: on id collision, replace the existing row with the incoming one.
   - `fail_atomic`: abort the entire import on the first row-level failure and roll back every row written so far in the same call. Backends that cannot guarantee atomicity (e.g. no transaction support) MUST return `not_supported` (HTTP `501`, JSON-RPC `-32002`) when this mode is requested — partial commits under a `fail_atomic` label are NOT permitted.
+
+    *Counters on `fail_atomic` rollback.* Because the whole import is reverted, the response counters describe only the trigger row, not the rows that were transiently written and then rolled back: `imported = 0`, `skipped = 0`, `failed = 1`, `errors` contains exactly one entry pointing at the trigger row's `line`. This is the contract regardless of how many rows were applied before the rollback fired.
   - `fail_fast`: abort the import on the first row-level failure but DO NOT roll back. Already-imported rows remain committed; the response reports `imported` count for committed rows plus the failing `line` in `errors[0]`. Use this when partial migration is acceptable and the caller will resume via id-keyed diff.
 
   *Note:* the v1.1 draft of this spec previously named the abort mode `fail` with implementation-defined rollback. That semantics is replaced by the explicit `fail_atomic` / `fail_fast` pair so callers always know which contract they're getting.

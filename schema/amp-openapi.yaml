@@ -377,93 +377,21 @@ paths:
       summary: Bulk import memories from MXF (amp.import)
       description: |
         Ingest a Memory Exchange Format (NDJSON) document into the backend under the
-        given scope. Each input line must be a `MemoryResult` row. Conflicts on existing
-        `id` are handled per `on_conflict` (skip | overwrite | fail_atomic | fail_fast).
-        See spec Appendix A and spec §3.3.5.
+        given scope. The request body is a single JSON object (`ImportRequest`) carrying
+        the structured `scope`, the inline `ndjson` document, and the `on_conflict` /
+        `scope_remap` policy fields. This shape mirrors the MCP `amp.import` tool
+        signature byte-for-byte so an MXF document exported from one backend can be
+        piped into another without an adapter layer regardless of which channel
+        each side uses.
 
         Harness-only system API. SHOULD NOT be exposed to the LLM through the MCP adapter.
       operationId: importMemories
-      parameters:
-        - name: on_conflict
-          in: query
-          required: false
-          description: |
-            Policy controlling what happens when a row cannot be cleanly imported.
-            For `skip` and `overwrite` the trigger is specifically an id collision;
-            for `fail_atomic` and `fail_fast` the trigger is ANY row-level failure
-            (id collision, malformed JSON, schema validation failure, or scope
-            violation).
-            - `skip` (default): on id collision, keep existing, count toward `skipped`
-              (idempotent re-import)
-            - `overwrite`: on id collision, replace existing with incoming row
-            - `fail_atomic`: abort and roll back the entire import on first row-level
-              failure (backends without transaction support MUST return 501
-              `not_supported`)
-            - `fail_fast`: abort on first row-level failure but DO NOT roll back
-              already-imported rows; caller resumes via id-keyed diff
-          schema:
-            type: string
-            enum: [skip, overwrite, fail_atomic, fail_fast]
-            default: skip
-        - name: scope_remap
-          in: query
-          required: false
-          description: |
-            Policy when an imported row's own scope omits an identity key present in the
-            request scope. `strict` (default) counts the row as failed
-            (amp_error_code=invalid_request); `inherit` fills missing identity keys from
-            the request scope. Callers MUST opt into `inherit` — it changes data ownership.
-            Rows whose scope CONFLICTS with the request scope are always failed regardless
-            of this policy.
-          schema:
-            type: string
-            enum: [strict, inherit]
-            default: strict
-        - name: agent_id
-          in: query
-          required: false
-          description: Optional flat scope identifier (mapped to scope.agent_id).
-          schema:
-            type: string
-        - name: group_id
-          in: query
-          required: false
-          schema:
-            type: string
-        - name: workspace_id
-          in: query
-          required: false
-          schema:
-            type: string
-        - name: user_id
-          in: query
-          required: false
-          schema:
-            type: string
-        - name: org_id
-          in: query
-          required: false
-          description: Optional scope identifier (mapped to scope.org_id).
-          schema:
-            type: string
-        - name: session_id
-          in: query
-          required: false
-          description: Optional scope identifier (mapped to scope.session_id).
-          schema:
-            type: string
-        - name: app_id
-          in: query
-          required: false
-          schema:
-            type: string
       requestBody:
         required: true
         content:
-          application/x-ndjson:
+          application/json:
             schema:
-              type: string
-              description: NDJSON document (MXF). One `MemoryResult` per line.
+              $ref: '#/components/schemas/ImportRequest'
       responses:
         '200':
           description: |
@@ -480,16 +408,26 @@ paths:
         '400':
           description: |
             Request-level error only: the request body is unparseable or empty, the
-            top-level `scope` field is missing/invalid, or a query parameter is
-            malformed. Per-line NDJSON failures do NOT use this status — they are
+            top-level `scope` field is missing/invalid, or the `ndjson` field is
+            missing. Per-line NDJSON failures do NOT use this status — they are
             counted in `ImportResponse.failed`/`errors` with a `200` response. See
             spec §3.3.5.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '501':
-          description: Backend does not support bulk import
+          description: |
+            Backend does not support bulk import, or does not support the requested
+            `on_conflict` policy (typically `fail_atomic` on non-transactional
+            backends). The `AmpErrorData.message` SHOULD identify which capability is
+            unsupported so callers can downgrade (e.g. retry with `fail_fast`).
           content:
             application/json:
               schema:
@@ -778,9 +716,7 @@ components:
           type: string
           description: Legacy flat partition identifier (mapped to scope.agent_id).
         filters:
-          type: object
-          description: Same shape as RecallFilters — status, source, timestamp_after, timestamp_before.
-          additionalProperties: true
+          $ref: '#/components/schemas/RecallFilters'
         page_size:
           type: integer
           minimum: 1
@@ -794,6 +730,52 @@ components:
             Opaque continuation token returned by the prior page's `X-AMP-Next-Cursor`
             header. When omitted, the export starts from the beginning of the
             deterministic order.
+
+    ImportRequest:
+      type: object
+      description: |
+        Bulk import request. Mirrors the MCP `amp.import` tool input signature
+        byte-for-byte so a single MXF document can move across either channel
+        without an adapter. `ndjson` carries the inline MemoryResult lines; the
+        structured `scope` and the `on_conflict` / `scope_remap` policy fields
+        govern how the import is applied.
+      required: [ndjson]
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
+      properties:
+        scope:
+          $ref: '#/components/schemas/Scope'
+        agent_id:
+          type: string
+          description: Legacy flat partition identifier (mapped to scope.agent_id).
+        ndjson:
+          type: string
+          description: |
+            MXF document (NDJSON). One `MemoryResult` per line. Each row MUST
+            conform to the MemoryResult schema; rows that do not are counted in
+            `ImportResponse.failed` rather than producing a 400.
+        on_conflict:
+          type: string
+          enum: [skip, overwrite, fail_atomic, fail_fast]
+          default: skip
+          description: |
+            Policy controlling what happens when a row cannot be cleanly imported.
+            See spec §3.3.5 for the full contract. Backends that cannot honor
+            `fail_atomic` (no transaction support) MUST return 501 `not_supported`
+            with an `AmpErrorData.message` identifying the unsupported policy.
+        scope_remap:
+          type: string
+          enum: [strict, inherit]
+          default: strict
+          description: |
+            Policy when an imported row's own scope omits an identity key
+            present in the request `scope`. `strict` (default) counts such
+            rows as failed (`invalid_request`); `inherit` fills missing keys
+            from the request scope. Callers MUST opt into `inherit` — it
+            changes data ownership and is unsuitable for round-trip migration
+            without explicit intent. Rows whose scope CONFLICTS with the
+            request scope are always failed regardless of this policy.
 
     ImportResponse:
       type: object

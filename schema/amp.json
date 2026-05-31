@@ -495,15 +495,27 @@
       "output": {
         "type": "object",
         "required": ["count"],
+        "oneOf": [
+          {
+            "description": "Synchronous export — the page is materialised inline. `ndjson` MUST be present (MAY be the empty string when count=0).",
+            "required": ["ndjson"],
+            "not": { "required": ["event_id"] }
+          },
+          {
+            "description": "Async export — the backend has queued the operation. `event_id` MUST be present so the caller can poll/subscribe for the eventual MXF document.",
+            "required": ["event_id"],
+            "not": { "required": ["ndjson"] }
+          }
+        ],
         "properties": {
           "ndjson": {
             "type": "string",
-            "description": "MXF document (NDJSON, one MemoryResult per line). Returned by the MCP adapter channel as a single string. The REST channel SHOULD stream application/x-ndjson instead."
+            "description": "MXF document (NDJSON, one MemoryResult per line). Returned by the MCP adapter channel as a single string. The REST channel SHOULD stream application/x-ndjson instead. MUST be present (possibly empty) on a synchronous response; MUST be absent on an asynchronous response (paired with event_id)."
           },
           "count": {
             "type": "integer",
             "minimum": 0,
-            "description": "Number of MemoryResult rows emitted in this page."
+            "description": "Number of MemoryResult rows emitted in this page. On an async response this is the number of rows queued for emission (typically 0 until the event resolves)."
           },
           "next_cursor": {
             "type": "string",
@@ -511,7 +523,7 @@
           },
           "event_id": {
             "type": "string",
-            "description": "Optional async processing reference if the backend executes the export asynchronously."
+            "description": "Async processing reference. MUST be present when the backend executes the export asynchronously (paired with no ndjson). Callers poll/subscribe to this id to receive the eventual MXF document."
           }
         }
       }
