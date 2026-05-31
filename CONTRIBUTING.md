@@ -37,19 +37,19 @@ If any part of the spec is ambiguous, contradictory, or unclear, open an issue u
 
 v1.1 is stable; v1.2 is open for design. The known gaps (none blocking adoption, all worth solving) are:
 
-| Topic | One-line scope |
-|---|---|
-| **Authentication & authorization** | API keys / OAuth / JWT story for the REST channel; per-scope ACLs |
-| **`amp.update`** | Amend a memory's content, metadata, or scope without losing its `id` or graph edges |
-| **Idempotency keys** | `Idempotency-Key` on `amp.encode` so retries don't duplicate |
-| **Bulk encode** | Multi-row encode without 30 round-trips |
-| **Change feeds / subscriptions** | SSE or webhook channel so agents in shared scopes can react to writes by other agents |
-| **Metadata filters in `RecallFilters`** | Predicate over reserved-vocabulary keys (`amp.confidence`, `amp.entities`, `amp.categories`) |
-| **Capability discovery** | `GET /v1/capabilities` exposing per-verb support (finer-grained than `amp_conformance: core|full`) |
-| **gRPC stubs** | The spec mentions gRPC; only OpenAPI ships today |
-| **MCP tool annotations beyond the four hints** | Once the MCP spec adds more, e.g. cost / latency hints |
-| **MXF embedding portability** | Decide whether embeddings travel in MXF, and how to negotiate model compatibility |
-| **Collaborative scope conflict resolution** | Two agents writing to the same `workspace_id` — LWW? CRDT? Causality? |
+| Topic | Status | One-line scope |
+|---|---|---|
+| **Authentication & authorization** | Open (deferred from PR #7) | API keys / OAuth / JWT story for the REST channel; per-scope ACLs. Until this lands, the `unauthorized` / `forbidden` error codes proposed in PR #7 are intentionally **not** in the spec — codes without a model behind them would let every backend invent its own. |
+| **`amp.update`** | v1.2-draft, in active development | Amend a memory's content or metadata without losing its `id` or graph edges. Reference-server implementation + compliance tests required before merge. |
+| **`amp.batch_encode`** | v1.2-draft, in active development | Multi-row encode in a single round-trip. Reference-server implementation + compliance tests required before merge. |
+| **Metadata filters in `RecallFilters`** | v1.2-draft, in active development | `MetadataFilter` predicate (`eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `contains`) over reserved-vocabulary and user-defined keys. Reference-server implementation + compliance tests required before merge. |
+| **Idempotency keys** | Open | `Idempotency-Key` header / field on `amp.encode` so retries don't duplicate. |
+| **Change feeds / subscriptions** | Open | SSE or webhook channel so agents in shared scopes can react to writes by other agents. |
+| **Capability discovery** | Open | `GET /v1/capabilities` exposing per-verb support (finer-grained than `amp_conformance: core|full`). |
+| **gRPC stubs / `.proto` shipping** | Partially landed (Appendix C contract); `schema/amp.proto` + reference server still open | Spec already pins the Protobuf v3 `MemoryService` contract; a shipped `.proto` and a reference gRPC server remain follow-up work. |
+| **MCP tool annotations beyond the four hints** | Open | Once the MCP spec adds more, e.g. cost / latency hints. |
+| **MXF embedding portability** | Open | Decide whether embeddings travel in MXF, and how to negotiate model compatibility. |
+| **Collaborative scope conflict resolution** | Open | Two agents writing to the same `workspace_id` — LWW? CRDT? Causality? |
 
 Process:
 
