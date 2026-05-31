@@ -254,6 +254,8 @@ Retrieve relevant memories.
 
 **Composition with v1.1 filters.** `metadata_filters` AND-composes with `status`, `source`, `timestamp_after`/`timestamp_before`, and the deprecated `visibility` filter. The conventional evaluation order is: scope partition → v1.1 filters → metadata_filters → vector-rank top_k, but backends MAY reorder for performance as long as the result set is identical.
 
+**`top_k` semantics under post-retrieval filtering.** A conformant `top_k` is the size of the *post-filter* result window, NOT a vector-rank pre-filter slice. A backend that filters after retrieval MUST therefore consider more than `top_k` candidates so a selective filter does not silently truncate matches — e.g. a `top_k=1` request where the rank-1 candidate fails the filter MUST still return the rank-2 candidate if it matches. Backends MAY cap how wide a candidate pool they sweep; the reference server oversamples up to `min(top_k * 10, 200)` candidates before applying post-retrieval predicates. Beyond that bound, fewer than `top_k` results is an honest answer.
+
 #### 3.2.3 amp.forget
 Delete a memory.
 
