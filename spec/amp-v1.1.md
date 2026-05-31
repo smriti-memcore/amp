@@ -1,7 +1,9 @@
-# Agent Memory Protocol (AMP) — Specification v1.1
+# Agent Memory Protocol (AMP) — Specification v1.2-draft
+
+> **Status — 2026-05-31:** v1.1 (the previous tagged revision) is stable and in production use. This document tracks the in-progress **v1.2-draft** revision, which extends v1.1 with new Appendix C (REST routing + gRPC interface contracts), provenance/lineage reserved metadata keys, and (in follow-up PRs) the `amp.update` and `amp.batch_encode` verbs and metadata filters in `RecallFilters`. v1.1-conformant backends remain conformant; v1.2-draft adds capability without breaking the v1.1 surface.
 *By Community, Of Community, For Community*
 
-> **Status:** v1.1 Draft — 2026-05-22
+> **Status:** v1.2-draft — 2026-05-31 (extends v1.1, released 2026-05-22)
 > **Authors:** Shivam Tyagi, Brad Jones, and the Open-Source Community
 
 ---
@@ -461,6 +463,11 @@ To resolve the "wild-west" of proprietary metadata formats, AMP v1.1 defines sta
 | `amp.relations` | array[object] | Subject-Predicate-Object triplets for graph-based stores. Each object must contain `{"subject": "", "predicate": "", "object": ""}`. |
 | `amp.categories` | array[string] | Broad classification categories for organizing memories (e.g., `["location", "preference", "hobby", "social"]`). |
 | `amp.summary` | string | A higher-order summarized representation of this memory, generated during consolidation. |
+| `amp.provenance.message_id` *(v1.2-draft)* | string | Conversation message id that triggered the memory's creation. Provides auditable evidence trace from a stored memory back to the source turn. |
+| `amp.provenance.run_id` *(v1.2-draft)* | string | The runtime session or execution-context run id under which the memory was generated. Useful for grouping memories that originated in the same agent loop. |
+| `amp.lineage.parent_ids` *(v1.2-draft)* | array[string] | Identifiers of parent memories merged or summarised into this memory during consolidation. Lets callers walk back from a consolidated summary to the raw rows that fed it. |
+
+The three `amp.provenance.*` / `amp.lineage.*` keys are introduced in v1.2-draft. v1.1-conformant backends MAY populate them; v1.2-conformant backends SHOULD populate them when the source information is available. Consumers MUST tolerate their absence.
 
 ---
 
@@ -557,3 +564,180 @@ In collaborative workloads (e.g., shared teams, departments, or workspaces), a u
    ```
    The application hosting harness (which manages sessions at the service boundary) intercepts retrieved memories and filters out any records whose metadata restrictions do not match the current active user before injecting context into the LLM prompt.
 
+
+---
+
+## Appendix C: Standalone API Channel Interface Contracts
+
+To standardise deployments using the **Standalone REST/gRPC API Channel** (§1.3), conformant servers and harnesses SHOULD follow the network-interface contract mappings below. v1.1-conformant servers MUST support the v1.1 REST endpoints (six rows below, marked *v1.1*); the rows marked *v1.2-draft* describe routes for verbs proposed in v1.2-draft and are not required for v1.1 conformance.
+
+### C.1 HTTP REST Endpoint Mapping
+
+| HTTP Method | Route Path | AMP Verb | Conformance | Description |
+|-------------|------------|----------|-------------|-------------|
+| `POST`   | `/v1/memories`               | `amp.encode`      | v1.1 | Store a new memory record. Accepts the standard JSON encode payload defined by `EncodeRequest`. |
+| `POST`   | `/v1/memories/recall`        | `amp.recall`      | v1.1 | Query relevant memories via semantic / keyword search. `POST` is used so complex scope and filter payloads can travel in the body rather than as query strings. |
+| `DELETE` | `/v1/memories/{id}`          | `amp.forget`      | v1.1 | Permanently erase a memory record by `id`. Scope travels as a `ScopeEnvelope` body per §3.3.3 (DELETE-with-body is valid per RFC 9110 §9.3.5). |
+| `PUT`    | `/v1/memories/{id}/pin`      | `amp.pin`         | v1.1 | Pin a specific memory so consolidation cannot archive it. |
+| `POST`   | `/v1/memories/consolidate`   | `amp.consolidate` | v1.1 | Trigger background memory consolidation for a specified scope partition. |
+| `GET`    | `/v1/memories/stats`         | `amp.stats`       | v1.1 | Retrieve count, status, and sizing metrics. Scope travels as discrete query parameters. |
+| `POST`   | `/v1/memories/export`        | `amp.export`      | v1.1 (Full) | Bulk export of a scope as MXF NDJSON. Streams `application/x-ndjson`. |
+| `POST`   | `/v1/memories/import`        | `amp.import`      | v1.1 (Full) | Bulk import of MXF NDJSON under a scope. Single `application/json` body wrapping the inline NDJSON and policy fields, matching the MCP shape byte-for-byte. |
+| `PATCH`  | `/v1/memories/{id}`          | `amp.update`      | v1.2-draft | Mutate a memory's `content` and/or `metadata` for an existing record without changing its `id`. |
+| `POST`   | `/v1/memories/batch_encode`  | `amp.batch_encode`| v1.2-draft | Store multiple memories in a single network round-trip. |
+
+The exact request/response shapes are defined by `schema/amp-openapi.yaml`. Backends MAY expose additional vendor-specific endpoints, but those MUST NOT shadow the paths above.
+
+*Authentication & authorization is intentionally out of scope for v1.1; an auth model — including the corresponding `unauthorized` / `forbidden` error codes — is tracked as a v1.2 design item. Until that model lands, backends that need access control SHOULD apply it at the harness layer or via a reverse proxy in front of `/v1/`.*
+
+### C.2 gRPC Protocol Buffer Definition
+
+For low-latency, high-throughput inter-service communication, conformant backends MAY expose the AMP contract as the `MemoryService` gRPC service using the Protobuf v3 definition below. The proto is descriptive — it documents how the JSON Schema in `schema/amp.json` maps to wire-compatible Protobuf — and is NOT separately versioned: a backend exposing the gRPC channel MUST keep its `MemoryService` semantics equivalent to its JSON-Schema-defined behaviour.
+
+The proto includes RPCs for the v1.2-draft `amp.update` verb so backends that do implement it have a canonical gRPC shape to follow. v1.1-only backends MAY omit the `Update` RPC. `amp.batch_encode` is left to a future revision of the proto to avoid lock-in on the batch shape before the verb's schema stabilises.
+
+```protobuf
+syntax = "proto3";
+
+package amp.v1;
+
+option go_package = "github.com/agent-memory-protocol/amp/v1;ampv1";
+option java_multiple_files = true;
+option java_package = "org.agentmemoryprotocol.amp.v1";
+
+// Multi-dimensional scoping keys per spec §2.3. At least one of the
+// isolating keys (agent_id, group_id, workspace_id, user_id) MUST be set.
+message Scope {
+  string agent_id     = 1;
+  string group_id     = 2;
+  string workspace_id = 3;
+  string user_id      = 4;
+  string session_id   = 5;
+  string app_id       = 6;
+  string org_id       = 7;
+}
+
+// v1.2-draft: structured metadata predicate. Operator is one of
+// {eq, ne, gt, gte, lt, lte, in, contains}. `value` is a JSON-encoded
+// string so a single field carries any scalar / array literal.
+message MetadataFilter {
+  string key       = 1;
+  string operator  = 2;
+  string value     = 3;
+}
+
+message RecallFilters {
+  string status            = 1;  // active | pinned | archived
+  string source            = 2;
+  string timestamp_after   = 3;  // ISO 8601
+  string timestamp_before  = 4;  // ISO 8601
+  repeated MetadataFilter metadata_filters = 5;  // v1.2-draft
+}
+
+message MemoryResult {
+  string id            = 1;
+  string content       = 2;
+  double score         = 3;
+  string source        = 4;
+  string timestamp     = 5;  // ISO 8601
+  string status        = 6;  // active | pinned | archived
+  Scope  scope         = 7;
+  string metadata_json = 8;  // JSON bag supporting reserved and custom keys
+}
+
+message AmpError {
+  string amp_error_code = 1;  // invalid_request | not_found | not_supported | backend_error
+  string message        = 2;
+}
+
+message EncodeRequest {
+  Scope  scope         = 1;
+  string content       = 2;
+  string source        = 3;
+  bool   force         = 4;
+  string metadata_json = 5;
+}
+
+message EncodeResponse {
+  string id       = 1;
+  string status   = 2;  // stored | duplicate | below_threshold | queued
+  string event_id = 3;
+}
+
+message RecallRequest {
+  Scope         scope   = 1;
+  string        query   = 2;
+  int32         top_k   = 3;
+  RecallFilters filters = 4;
+}
+
+message RecallResponse {
+  repeated MemoryResult results = 1;
+}
+
+message ForgetRequest {
+  Scope  scope = 1;
+  string id    = 2;
+}
+
+message ForgetResponse {
+  string status = 1;  // forgotten | not_found
+}
+
+message PinRequest {
+  Scope  scope = 1;
+  string id    = 2;
+}
+
+message PinResponse {
+  string status = 1;  // pinned | not_found | not_supported
+}
+
+message ConsolidateRequest {
+  Scope  scope = 1;
+  string depth = 2;  // full | light
+}
+
+message ConsolidateResponse {
+  string status              = 1;  // queued | ok | not_supported
+  int32  memories_processed  = 2;
+}
+
+message StatsRequest {
+  Scope scope = 1;
+}
+
+message StatsResponse {
+  int32  memory_count         = 1;
+  int32  unconsolidated_count = 2;
+  string metadata_json        = 3;
+}
+
+// v1.2-draft: mutate an existing memory in place. Backends that have
+// not yet implemented amp.update MAY omit this RPC.
+message UpdateRequest {
+  Scope  scope         = 1;
+  string id            = 2;
+  string content       = 3;  // omit to leave unchanged
+  string metadata_json = 4;  // omit to leave unchanged; backend MAY define merge vs replace
+}
+
+message UpdateResponse {
+  string status = 1;  // updated | not_found | not_supported
+}
+
+// Service definition exposing the AMP contract over gRPC.
+// All RPCs MUST return AmpError (via standard gRPC status with the AMP
+// error code in the trailer) on failure, mirroring §3.5 error mapping.
+service MemoryService {
+  rpc Encode      (EncodeRequest)      returns (EncodeResponse);
+  rpc Recall      (RecallRequest)      returns (RecallResponse);
+  rpc Forget      (ForgetRequest)      returns (ForgetResponse);
+  rpc Pin         (PinRequest)         returns (PinResponse);
+  rpc Consolidate (ConsolidateRequest) returns (ConsolidateResponse);
+  rpc Stats       (StatsRequest)       returns (StatsResponse);
+  rpc Update      (UpdateRequest)      returns (UpdateResponse);  // v1.2-draft
+}
+```
+
+A `.proto` file mirroring the definition above will be shipped under `schema/amp.proto` once a reference gRPC server implementation lands. Until then, the spec text in this appendix is normative for any backend exposing the gRPC channel.
