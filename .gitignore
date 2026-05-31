@@ -18,3 +18,4 @@ env/
 *.log
 .DS_Store
 python/amp-server/.venv/
+.idea/

@@ -1,6 +1,6 @@
 # Agent Memory Protocol (AMP) — Specification v1.2-draft
 
-> **Status — 2026-05-31:** v1.1 (the previous tagged revision) is stable and in production use. This document tracks the in-progress **v1.2-draft** revision, which extends v1.1 with new Appendix C (REST routing + gRPC interface contracts), provenance/lineage reserved metadata keys, and (in follow-up PRs) the `amp.update` and `amp.batch_encode` verbs and metadata filters in `RecallFilters`. v1.1-conformant backends remain conformant; v1.2-draft adds capability without breaking the v1.1 surface.
+> **Status — 2026-05-31:** v1.1 (the previous tagged revision) is stable and in production use. This document tracks the in-progress **v1.2-draft** revision, which extends v1.1 with new Appendix C (REST routing + gRPC interface contracts), provenance/lineage reserved metadata keys, the `amp.update` and `amp.batch_encode` verbs, and structured `metadata_filters` in `RecallFilters`. v1.1-conformant backends remain conformant; v1.2-draft adds capability without breaking the v1.1 surface.
 *By Community, Of Community, For Community*
 
 > **Status:** v1.2-draft — 2026-05-31 (extends v1.1, released 2026-05-22)
@@ -205,7 +205,10 @@ Retrieve relevant memories.
       "visibility": "string", // [DEPRECATED in v1.1]
       "source": "string",
       "timestamp_after": "ISO 8601",
-      "timestamp_before": "ISO 8601"
+      "timestamp_before": "ISO 8601",
+      "metadata_filters": [ // [v1.2-draft]
+        { "key": "string", "operator": "eq|ne|gt|gte|lt|lte|in|contains", "value": "<scalar|array>" }
+      ]
     }
   }
   ```
@@ -216,6 +219,40 @@ Retrieve relevant memories.
     "results": [MemoryResult]
   }
   ```
+
+##### 3.2.2.1 metadata_filters *(v1.2-draft)*
+
+`filters.metadata_filters` is an ordered array of `MetadataFilter` predicates evaluated against each candidate memory's `metadata` bag. The array MAY be empty or omitted; both are equivalent to "no metadata filtering".
+
+**Conformance.** Introduced in v1.2-draft. v1.1-conformant backends MAY ignore the field (legacy fall-through) or return `not_supported` (HTTP `501`, JSON-RPC `-32002`) when it is present and non-empty. v1.2-conformant backends MUST implement every operator below.
+
+**Key resolution.** `key` is a flat lookup against the stored metadata object. Reserved AMP keys like `amp.confidence` and `amp.categories` are addressable directly — the dot is a literal character, not a JSONPath separator. A future revision may add path syntax behind an explicit flag; v1.2-draft does not.
+
+**Operators.** All eight operators are required.
+
+| Operator   | Value shape                  | Semantics                                                                                          |
+|------------|------------------------------|----------------------------------------------------------------------------------------------------|
+| `eq`       | scalar (string\|number\|bool) | Strict equality. Numeric and boolean types do not cross-compare; `1` does not match `true`.       |
+| `ne`       | scalar                        | Strict inequality. A missing key is **not** "ne anything" — see "Missing keys" below.             |
+| `gt`       | scalar (string\|number)       | Greater than. Strings compare lexicographically; numbers numerically.                              |
+| `gte`      | scalar (string\|number)       | Greater than or equal.                                                                             |
+| `lt`       | scalar (string\|number)       | Less than.                                                                                         |
+| `lte`      | scalar (string\|number)       | Less than or equal.                                                                                |
+| `in`       | array of scalars              | Row matches when the stored value strict-equals any element of `value`.                            |
+| `contains` | scalar                        | Row matches when the stored value (array OR string) contains `value` (element-of, or substring).   |
+
+**Composition.** Multiple entries in `metadata_filters` are combined with strict AND — a candidate row MUST satisfy every entry to be returned. There is no OR or NOT at the protocol layer in v1.2-draft; callers needing disjunction issue multiple recalls and merge client-side.
+
+**Missing keys.** If a candidate memory does not have `key` in its metadata, every operator (including `ne`) MUST evaluate to **false** for that row. Treating a missing key as "not equal to X" would surface every metadata-less memory through any `ne` filter, which is almost never what a caller wants.
+
+**Type mismatches.** If the stored value's runtime type cannot satisfy the operator (e.g. `gt` against a string when `value` is a number; `contains` against a number; `in` where `value` is not an array), the row MUST evaluate to **false** for that filter — never raise a server error. Type-mismatch as a silent miss keeps the recall pipeline well-defined when a metadata bag is heterogeneous across rows.
+
+**Error surface.** Request-level problems still raise `AmpError`:
+- `operator` not in the eight-element enum above → `invalid_request` (`-32602`).
+- `value` shape doesn't match the operator family (e.g. `operator: "in"` with a non-array `value`) → `invalid_request`.
+- Missing `key`, `operator`, or `value` field on any entry → `invalid_request`.
+
+**Composition with v1.1 filters.** `metadata_filters` AND-composes with `status`, `source`, `timestamp_after`/`timestamp_before`, and the deprecated `visibility` filter. The conventional evaluation order is: scope partition → v1.1 filters → metadata_filters → vector-rank top_k, but backends MAY reorder for performance as long as the result set is identical.
 
 #### 3.2.3 amp.forget
 Delete a memory.

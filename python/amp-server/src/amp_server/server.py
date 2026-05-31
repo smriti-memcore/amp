@@ -502,6 +502,139 @@ def amp_batch_encode(
 
 # ── amp.recall ────────────────────────────────────────────────────────────────
 
+_METADATA_FILTER_OPERATORS = frozenset(
+    {"eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"}
+)
+_ORDER_OPERATORS = frozenset({"gt", "gte", "lt", "lte"})
+
+
+def _validate_metadata_filters(filters: Any) -> None:
+    """Validate the request-level shape of filters.metadata_filters.
+
+    Raises AmpToolError(invalid_request) on any structural problem. Row-level
+    type mismatches are NOT raised here — those become silent misses inside
+    _apply_metadata_filters per spec §3.2.2.1.
+    """
+    if not isinstance(filters, list):
+        raise AmpToolError(
+            "invalid_request",
+            "filters.metadata_filters must be an array of MetadataFilter objects",
+        )
+    for idx, entry in enumerate(filters):
+        if not isinstance(entry, dict):
+            raise AmpToolError(
+                "invalid_request",
+                f"filters.metadata_filters[{idx}] must be an object",
+            )
+        for required in ("key", "operator", "value"):
+            if required not in entry:
+                raise AmpToolError(
+                    "invalid_request",
+                    f"filters.metadata_filters[{idx}].{required} is required",
+                )
+        key = entry["key"]
+        op = entry["operator"]
+        value = entry["value"]
+        if not isinstance(key, str) or not key:
+            raise AmpToolError(
+                "invalid_request",
+                f"filters.metadata_filters[{idx}].key must be a non-empty string",
+            )
+        if op not in _METADATA_FILTER_OPERATORS:
+            raise AmpToolError(
+                "invalid_request",
+                f"filters.metadata_filters[{idx}].operator '{op}' is not one of "
+                f"{sorted(_METADATA_FILTER_OPERATORS)}",
+            )
+        if op == "in":
+            if not isinstance(value, list):
+                raise AmpToolError(
+                    "invalid_request",
+                    f"filters.metadata_filters[{idx}].value must be an array when operator='in'",
+                )
+        else:
+            # eq/ne/gt/gte/lt/lte/contains all want a scalar.
+            if isinstance(value, (list, dict)):
+                raise AmpToolError(
+                    "invalid_request",
+                    f"filters.metadata_filters[{idx}].value must be a scalar when operator='{op}'",
+                )
+
+
+def _eval_metadata_filter(stored: Any, op: str, value: Any) -> bool:
+    """Evaluate a single (operator, value) against a stored metadata value.
+
+    Returns False on any type mismatch — never raises. Caller has already
+    validated request shape via _validate_metadata_filters.
+    """
+    if op == "eq":
+        # bool is a subclass of int in Python; require type-strict equality so
+        # 1 != True (spec §3.2.2.1: "Numeric and boolean types do not cross-compare").
+        if isinstance(stored, bool) != isinstance(value, bool):
+            return False
+        return stored == value
+    if op == "ne":
+        if isinstance(stored, bool) != isinstance(value, bool):
+            return True  # different types => not equal
+        return stored != value
+    if op in _ORDER_OPERATORS:
+        # Order operators only defined for matching scalar types (no bool/int
+        # cross-compare; no string vs number).
+        if isinstance(stored, bool) or isinstance(value, bool):
+            return False
+        stored_kind = "num" if isinstance(stored, (int, float)) else (
+            "str" if isinstance(stored, str) else None
+        )
+        value_kind = "num" if isinstance(value, (int, float)) else (
+            "str" if isinstance(value, str) else None
+        )
+        if stored_kind is None or stored_kind != value_kind:
+            return False
+        try:
+            if op == "gt":
+                return stored > value  # type: ignore[operator]
+            if op == "gte":
+                return stored >= value  # type: ignore[operator]
+            if op == "lt":
+                return stored < value  # type: ignore[operator]
+            if op == "lte":
+                return stored <= value  # type: ignore[operator]
+        except TypeError:
+            return False
+    if op == "in":
+        # value is guaranteed to be a list by _validate_metadata_filters.
+        for elem in value:  # type: ignore[union-attr]
+            # Reuse eq semantics so bool/int don't cross-compare.
+            if isinstance(stored, bool) != isinstance(elem, bool):
+                continue
+            if stored == elem:
+                return True
+        return False
+    if op == "contains":
+        if isinstance(stored, list):
+            for elem in stored:
+                if isinstance(elem, bool) != isinstance(value, bool):
+                    continue
+                if elem == value:
+                    return True
+            return False
+        if isinstance(stored, str) and isinstance(value, str):
+            return value in stored
+        return False
+    return False  # unreachable — op already validated
+
+
+def _apply_metadata_filters(metadata: Dict[str, Any], filters: list) -> bool:
+    """Return True iff every entry in filters matches the metadata bag (AND)."""
+    for entry in filters:
+        key = entry["key"]
+        if key not in metadata:
+            return False  # missing key => filter miss for every operator (spec §3.2.2.1)
+        if not _eval_metadata_filter(metadata[key], entry["operator"], entry["value"]):
+            return False
+    return True
+
+
 @mcp.tool(
     name="amp.recall",
     description="Retrieve memories relevant to a query.",
@@ -523,6 +656,15 @@ def amp_recall(
     if not isinstance(query, str) or not query.strip():
         raise AmpToolError("invalid_request", "query must be a non-empty string")
 
+    # Validate metadata_filters at request-level BEFORE we touch the backend.
+    # Row-level type mismatches are silent misses (per spec §3.2.2.1) but the
+    # request shape itself must be well-formed or we raise invalid_request.
+    metadata_filters = None
+    if filters:
+        metadata_filters = filters.get("metadata_filters")
+        if metadata_filters is not None:
+            _validate_metadata_filters(metadata_filters)
+
     norm_scope = _normalize_scope(scope, agent_id)
     smriti = _get_agent_for_scope(norm_scope)
     memories = smriti.recall(query, top_k=top_k)
@@ -537,6 +679,10 @@ def amp_recall(
                 continue
             source_filter = filters.get("source")
             if source_filter and result["source"] != source_filter:
+                continue
+            if metadata_filters and not _apply_metadata_filters(
+                result.get("metadata") or {}, metadata_filters
+            ):
                 continue
         results.append(result)
 

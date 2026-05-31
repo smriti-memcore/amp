@@ -1604,3 +1604,262 @@ class TestBatchEncodeAnnotations:
         assert ann.get("destructiveHint") is False
         assert ann.get("idempotentHint") is False
         assert ann.get("openWorldHint") is False
+
+
+class TestMetadataFiltersBasic:
+    """v1.2-draft amp.recall filters.metadata_filters[] per spec §3.2.2.1."""
+
+    def _seed(self, client, agent_id, rows):
+        """Encode each (tag, metadata) row; return list of memory ids."""
+        ids = []
+        for tag, md in rows:
+            enc = client.call_tool("amp.encode", {
+                "agent_id": agent_id,
+                "content": f"metadata filter test {tag}",
+                "force": True,
+                "metadata": md,
+            })
+            assert enc.get("status") == "stored", f"seed failed: {enc}"
+            ids.append(enc["id"])
+        return ids
+
+    def _recall_tags(self, client, agent_id, metadata_filters):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "metadata filter test",
+            "top_k": 50,
+            "filters": {"metadata_filters": metadata_filters},
+        })
+        assert "error" not in resp, f"recall error: {resp}"
+        # Extract the per-row tag we encoded so tests can assert membership.
+        out = []
+        for r in resp["results"]:
+            content = r.get("content") or ""
+            if content.startswith("metadata filter test "):
+                out.append(content[len("metadata filter test "):])
+        return out
+
+    def test_eq_filter_matches_only_equal_rows(self, client, agent_id):
+        if not _has_verb(client, "amp.recall"):
+            pytest.skip("amp.recall not advertised")
+        self._seed(client, agent_id, [
+            ("eq_a", {"tag": "alpha"}),
+            ("eq_b", {"tag": "beta"}),
+        ])
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "tag", "operator": "eq", "value": "alpha"},
+        ])
+        assert "eq_a" in tags
+        assert "eq_b" not in tags
+
+    def test_ne_filter_excludes_equal_rows(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("ne_a", {"tag": "alpha"}),
+            ("ne_b", {"tag": "beta"}),
+        ])
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "tag", "operator": "ne", "value": "alpha"},
+        ])
+        assert "ne_a" not in tags
+        assert "ne_b" in tags
+
+    def test_numeric_order_filters(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("num_lo", {"amp.confidence": 0.3}),
+            ("num_mid", {"amp.confidence": 0.6}),
+            ("num_hi", {"amp.confidence": 0.9}),
+        ])
+        gt = self._recall_tags(client, agent_id, [
+            {"key": "amp.confidence", "operator": "gt", "value": 0.5},
+        ])
+        assert "num_lo" not in gt
+        assert "num_mid" in gt and "num_hi" in gt
+
+        gte = self._recall_tags(client, agent_id, [
+            {"key": "amp.confidence", "operator": "gte", "value": 0.6},
+        ])
+        assert "num_lo" not in gte
+        assert "num_mid" in gte and "num_hi" in gte
+
+        lt = self._recall_tags(client, agent_id, [
+            {"key": "amp.confidence", "operator": "lt", "value": 0.6},
+        ])
+        assert "num_lo" in lt
+        assert "num_mid" not in lt and "num_hi" not in lt
+
+        lte = self._recall_tags(client, agent_id, [
+            {"key": "amp.confidence", "operator": "lte", "value": 0.6},
+        ])
+        assert "num_lo" in lte and "num_mid" in lte
+        assert "num_hi" not in lte
+
+    def test_in_filter_against_array_value(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("in_a", {"priority": "low"}),
+            ("in_b", {"priority": "mid"}),
+            ("in_c", {"priority": "high"}),
+        ])
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "priority", "operator": "in", "value": ["low", "high"]},
+        ])
+        assert "in_a" in tags and "in_c" in tags
+        assert "in_b" not in tags
+
+    def test_contains_substring_on_string_value(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("cs_a", {"label": "alpha-beta-gamma"}),
+            ("cs_b", {"label": "delta-epsilon"}),
+        ])
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "label", "operator": "contains", "value": "beta"},
+        ])
+        assert "cs_a" in tags
+        assert "cs_b" not in tags
+
+    def test_contains_element_on_array_value(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("ca_a", {"amp.categories": ["pref", "ui"]}),
+            ("ca_b", {"amp.categories": ["fact", "history"]}),
+        ])
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "amp.categories", "operator": "contains", "value": "pref"},
+        ])
+        assert "ca_a" in tags
+        assert "ca_b" not in tags
+
+    def test_and_composition_strict(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("and_a", {"tag": "alpha", "amp.confidence": 0.8}),
+            ("and_b", {"tag": "alpha", "amp.confidence": 0.2}),
+            ("and_c", {"tag": "beta", "amp.confidence": 0.9}),
+        ])
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "tag", "operator": "eq", "value": "alpha"},
+            {"key": "amp.confidence", "operator": "gte", "value": 0.5},
+        ])
+        assert "and_a" in tags
+        assert "and_b" not in tags  # low confidence
+        assert "and_c" not in tags  # wrong tag
+
+    def test_missing_key_is_a_miss_for_every_operator(self, client, agent_id):
+        # Even ne — a missing key must NOT match "ne anything" per §3.2.2.1.
+        self._seed(client, agent_id, [
+            ("mk_a", {"tag": "alpha"}),
+            ("mk_b", {}),  # no tag key at all
+        ])
+        ne = self._recall_tags(client, agent_id, [
+            {"key": "tag", "operator": "ne", "value": "alpha"},
+        ])
+        assert "mk_a" not in ne
+        assert "mk_b" not in ne  # missing key => filter miss, even for ne
+
+        eq = self._recall_tags(client, agent_id, [
+            {"key": "tag", "operator": "eq", "value": "alpha"},
+        ])
+        assert "mk_a" in eq
+        assert "mk_b" not in eq
+
+    def test_type_mismatch_is_silent_miss(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("tm_str", {"tag": "not-a-number"}),
+            ("tm_num", {"tag": 42}),
+        ])
+        # gt with numeric value: string-typed rows must drop out silently.
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "tag", "operator": "gt", "value": 10},
+        ])
+        assert "tm_str" not in tags
+        assert "tm_num" in tags
+
+    def test_composes_with_status_filter(self, client, agent_id):
+        # v1.1 filters (status here) and v1.2 metadata_filters AND together.
+        self._seed(client, agent_id, [
+            ("comp_a", {"tag": "alpha"}),
+        ])
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "metadata filter test",
+            "top_k": 50,
+            "filters": {
+                "status": "active",
+                "metadata_filters": [
+                    {"key": "tag", "operator": "eq", "value": "alpha"},
+                ],
+            },
+        })
+        assert "error" not in resp, resp
+        tags = [
+            (r.get("content") or "")[len("metadata filter test "):]
+            for r in resp["results"]
+            if (r.get("content") or "").startswith("metadata filter test ")
+        ]
+        assert "comp_a" in tags
+
+    def test_empty_metadata_filters_array_is_noop(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("empty_a", {"tag": "alpha"}),
+        ])
+        tags = self._recall_tags(client, agent_id, [])
+        assert "empty_a" in tags
+
+
+class TestMetadataFiltersErrors:
+    """Request-level validation surface — these raise AmpError, not silent miss."""
+
+    def test_unknown_operator_is_invalid_request(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "regex", "value": "^a"},
+            ]},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_in_with_scalar_value_is_invalid_request(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "in", "value": "alpha"},
+            ]},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_eq_with_array_value_is_invalid_request(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "eq", "value": ["alpha", "beta"]},
+            ]},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_missing_required_field_is_invalid_request(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": [
+                {"key": "tag", "operator": "eq"},  # no value
+            ]},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_metadata_filters_not_an_array_is_invalid_request(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"metadata_filters": {"key": "tag", "operator": "eq", "value": "a"}},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
