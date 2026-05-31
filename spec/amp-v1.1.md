@@ -203,7 +203,14 @@ Retrieve relevant memories.
       "visibility": "string", // [DEPRECATED in v1.1]
       "source": "string",
       "timestamp_after": "ISO 8601",
-      "timestamp_before": "ISO 8601"
+      "timestamp_before": "ISO 8601",
+      "metadata_filters": [
+        {
+          "key": "string",
+          "operator": "eq | ne | gte | lte | contains | in",
+          "value": "string | number | boolean | array"
+        }
+      ]
     }
   }
   ```
@@ -232,6 +239,73 @@ Delete a memory.
   ```json
   {
     "status": "forgotten | not_found"
+  }
+  ```
+
+#### 3.2.4 amp.update
+Mutate an existing memory's content or metadata without modifying its unique identifier. Core performance feature.
+
+* **Input:**
+  ```json
+  {
+    "scope": {
+      "agent_id": "string",
+      "group_id": "string",
+      "workspace_id": "string",
+      "user_id": "string",
+      "session_id": "string",
+      "app_id": "string",
+      "org_id": "string"
+    },
+    "id": "string",
+    "content": "string", // Optional if updating metadata only
+    "metadata": {}        // Optional if updating content only
+  }
+  ```
+
+* **Output:**
+  ```json
+  {
+    "status": "updated | not_found | not_supported"
+  }
+  ```
+
+#### 3.2.5 amp.batch_encode
+Store multiple new memories for an agent in a single batch operation to optimize high-throughput latency.
+
+* **Input:**
+  ```json
+  {
+    "scope": {
+      "agent_id": "string",
+      "group_id": "string",
+      "workspace_id": "string",
+      "user_id": "string",
+      "session_id": "string",
+      "app_id": "string",
+      "org_id": "string"
+    },
+    "memories": [
+      {
+        "content": "string",
+        "source": "string",
+        "force": false,
+        "metadata": {}
+      }
+    ]
+  }
+  ```
+
+* **Output:**
+  ```json
+  {
+    "results": [
+      {
+        "id": "string",
+        "status": "stored | duplicate | below_threshold | queued",
+        "event_id": "string"
+      }
+    ]
   }
   ```
 
@@ -321,6 +395,8 @@ All service-level errors must return a JSON body matching the `AmpErrorData` sch
 | AMP Error Code (`amp_error_code`) | JSON-RPC Code | HTTP Status | Description |
 |-----------------------------------|---------------|-------------|-------------|
 | `invalid_request`                 | `-32602`      | `400 Bad Request` | Missing required parameters, invalid scope configuration, validation errors, or empty inputs. Backends MAY use `-32600` instead when the inbound JSON-RPC frame itself is malformed at the transport layer (vs a well-formed call with bad params). |
+| `unauthorized`                    | `-32003`      | `401 Unauthorized` | Missing, expired, or invalid credentials/tokens provided at the service boundary. |
+| `forbidden`                       | `-32004`      | `403 Forbidden` | The authenticated entity's permissions or JWT scopes are insufficient to access the requested `scope` partition. |
 | `not_found`                       | `-32001`      | `404 Not Found` | The specified memory `id` could not be found under the active scope/partition. |
 | `not_supported`                   | `-32002`      | `501 Not Implemented` | The backend is a lightweight conformance engine and does not support the requested operation (e.g. `consolidate` or `pin`). |
 | `backend_error`                   | `-32000`      | `500 Internal Server Error` | Unhandled database failures, connection dropouts, or downstream API timeouts. |
@@ -339,6 +415,9 @@ To resolve the "wild-west" of proprietary metadata formats, AMP v1.1 defines sta
 | `amp.relations` | array[object] | Subject-Predicate-Object triplets for graph-based stores. Each object must contain `{"subject": "", "predicate": "", "object": ""}`. |
 | `amp.categories` | array[string] | Broad classification categories for organizing memories (e.g., `["location", "preference", "hobby", "social"]`). |
 | `amp.summary` | string | A higher-order summarized representation of this memory, generated during consolidation. |
+| `amp.provenance.message_id` | string | Unique conversation message ID that triggered the memory. Provides auditable evidence trace. |
+| `amp.provenance.run_id` | string | The runtime session or execution context run ID associated with memory generation. |
+| `amp.lineage.parent_ids` | array[string] | Identifiers of parent memories merged/summarized to form this memory during consolidation runs. |
 
 ---
 
@@ -404,3 +483,162 @@ In collaborative workloads (e.g., shared teams, departments, or workspaces), a u
    ```
    The application hosting harness (which manages sessions at the service boundary) intercepts retrieved memories and filters out any records whose metadata restrictions do not match the current active user before injecting context into the LLM prompt.
 
+---
+
+## Appendix C: Standalone API Channel Interface Contracts
+
+To standardise deployments utilizing the **Standalone REST/gRPC API Channel** (spec section 1.3), conformant servers and harnesses MUST adhere to the following network interface contract mappings.
+
+### C.1 HTTP REST Endpoint Mapping
+
+All standalone REST APIs MUST serve endpoints mapped directly to the core AMP cognitive and autonomic verbs:
+
+| HTTP Method | Route Path | Core AMP Verb | Description |
+|-------------|------------|---------------|-------------|
+| `POST` | `/v1/memories` | `amp.encode` | Store a new memory record. Accepts standard JSON encode payload. |
+| `POST` | `/v1/memories/recall` | `amp.recall` | Query relevant memories via semantic/keyword search. POST is utilized to support complex scope and filter payloads. |
+| `PATCH` | `/v1/memories/{id}` | `amp.update` | Mutate memory content or metadata for an existing record by `id`. |
+| `DELETE` | `/v1/memories/{id}` | `amp.forget` | Permanently erase a memory record by `id`. |
+| `POST` | `/v1/memories/{id}/pin` | `amp.pin` | Pin a specific memory by `id` to prevent consolidation decay. |
+| `POST` | `/v1/consolidate` | `amp.consolidate` | Trigger background memory consolidation for a specified scope partition. |
+| `POST` | `/v1/stats` | `amp.stats` | Retrieve count, status, and sizing metrics. POST is utilized to pass the scope partition details. |
+
+*Note: In REST mode, if authorization is active, the backend MUST verify that authorization tokens (e.g. JWT) match or encompass the `scope` partition parameters. If mismatched, the server MUST emit a `403 Forbidden` response utilizing the standard `AmpErrorData` error wrapper.*
+
+### C.2 gRPC Protocol Buffer Definition
+
+For low-latency, high-performance inter-service communication, conformant backends MAY expose the standard `MemoryService` using the following Protobuf v3 contract:
+
+```protobuf
+syntax = "proto3";
+
+package amp.v1;
+
+option go_package = "github.com/agent-memory-protocol/amp/v1;ampv1";
+option java_multiple_files = true;
+option java_package = "org.agentmemoryprotocol.amp.v1";
+
+// Multi-dimensional scoping keys for database partitioning
+message Scope {
+  string agent_id = 1;
+  string group_id = 2;
+  string workspace_id = 3;
+  string user_id = 4;
+  string session_id = 5;
+  string app_id = 6;
+  string org_id = 7;
+}
+
+// Custom key-value filter parameters for metadata attributes
+message MetadataFilter {
+  string key = 1;
+  string operator = 2; // eq, ne, gte, lte, contains, in
+  string value = 3;    // JSON string representation of target matching values
+}
+
+// Retrieval filters for search queries
+message RecallFilters {
+  string status = 1; // active, pinned, archived
+  string source = 2;
+  string timestamp_after = 3;  // ISO 8601
+  string timestamp_before = 4; // ISO 8601
+  repeated MetadataFilter metadata_filters = 5;
+}
+
+// Canonical memory payload
+message MemoryResult {
+  string id = 1;
+  string content = 2;
+  double score = 3;
+  string source = 4;
+  string timestamp = 5; // ISO 8601
+  string status = 6;    // active, pinned, archived
+  Scope scope = 7;
+  string metadata_json = 8; // JSON bag supporting reserved and custom keys
+}
+
+message EncodeRequest {
+  Scope scope = 1;
+  string content = 2;
+  string source = 3;
+  bool force = 4;
+  string metadata_json = 5;
+}
+
+message EncodeResponse {
+  string id = 1;
+  string status = 2; // stored, duplicate, below_threshold, queued
+  string event_id = 3;
+}
+
+message RecallRequest {
+  Scope scope = 1;
+  string query = 2;
+  int32 top_k = 3;
+  RecallFilters filters = 4;
+}
+
+message RecallResponse {
+  repeated MemoryResult results = 1;
+}
+
+message ForgetRequest {
+  Scope scope = 1;
+  string id = 2;
+}
+
+message ForgetResponse {
+  string status = 3; // forgotten, not_found
+}
+
+message UpdateRequest {
+  Scope scope = 1;
+  string id = 2;
+  string content = 3;
+  string metadata_json = 4;
+}
+
+message UpdateResponse {
+  string status = 1; // updated, not_found, not_supported
+}
+
+message ConsolidateRequest {
+  Scope scope = 1;
+  string depth = 2; // full, light
+}
+
+message ConsolidateResponse {
+  string status = 1; // queued, ok, not_supported
+  int32 memories_processed = 2;
+}
+
+message PinRequest {
+  Scope scope = 1;
+  string id = 2;
+}
+
+message PinResponse {
+  string status = 1; // pinned, not_found, not_supported
+}
+
+message StatsRequest {
+  Scope scope = 1;
+}
+
+message StatsResponse {
+  int32 memory_count = 1;
+  int32 unconsolidated_count = 2;
+  string metadata_json = 3;
+}
+
+// Service definition exposing the core AMP contract
+service MemoryService {
+  rpc Encode(EncodeRequest) returns (EncodeResponse);
+  rpc Recall(RecallRequest) returns (RecallResponse);
+  rpc Forget(ForgetRequest) returns (ForgetResponse);
+  rpc Update(UpdateRequest) returns (UpdateResponse);
+  rpc Consolidate(ConsolidateRequest) returns (ConsolidateResponse);
+  rpc Pin(PinRequest) returns (PinResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+}
+```

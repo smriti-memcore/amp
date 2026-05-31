@@ -130,6 +130,21 @@
             "amp.summary": {
               "type": "string",
               "description": "A higher-order summarized representation of this memory."
+            },
+            "amp.provenance.message_id": {
+              "type": "string",
+              "description": "Unique identifier of the message that generated this memory."
+            },
+            "amp.provenance.run_id": {
+              "type": "string",
+              "description": "Unique session run identifier associated with memory generation."
+            },
+            "amp.lineage.parent_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Identifiers of parent memories merged/summarized during consolidation."
             }
           },
           "additionalProperties": true
@@ -164,8 +179,35 @@
           "type": "string",
           "format": "date-time",
           "description": "Return only memories created before this time."
+        },
+        "metadata_filters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MetadataFilter"
+          },
+          "description": "Structured conditional queries targeting specific metadata attributes. Standard v1.2 extension."
         }
-
+      },
+      "additionalProperties": false
+    },
+    "MetadataFilter": {
+      "type": "object",
+      "description": "Structured metadata key-value constraint.",
+      "required": ["key", "operator", "value"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The exact metadata attribute key path to query."
+        },
+        "operator": {
+          "type": "string",
+          "enum": ["eq", "ne", "gte", "lte", "contains", "in"],
+          "description": "Comparison operator."
+        },
+        "value": {
+          "type": ["string", "number", "boolean", "array"],
+          "description": "The target value(s) to match."
+        }
       },
       "additionalProperties": false
     },
@@ -176,7 +218,7 @@
       "properties": {
         "amp_error_code": {
           "type": "string",
-          "enum": ["invalid_request", "not_found", "not_supported", "backend_error"],
+          "enum": ["invalid_request", "unauthorized", "forbidden", "not_found", "not_supported", "backend_error"],
           "description": "AMP-specific error code."
         },
         "message": {
@@ -457,6 +499,133 @@
             "type": "object",
             "description": "Backend-specific statistics. Supports reserved AMP keys.",
             "additionalProperties": true
+          }
+        }
+      }
+    },
+    "amp.update": {
+      "description": "Mutate an existing memory's content or metadata. Core performance feature.",
+      "input": {
+        "type": "object",
+        "required": ["id"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
+          },
+          "id": {
+            "type": "string",
+            "description": "ID of the memory to update."
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Updated text content of the memory (optional if updating metadata only)."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Updated metadata keys to merge or set. Supports reserved AMP keys.",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["updated", "not_found", "not_supported"],
+            "description": "Outcome of the update operation."
+          }
+        }
+      }
+    },
+    "amp.batch_encode": {
+      "description": "Store multiple new memories for an agent in a single batch operation.",
+      "input": {
+        "type": "object",
+        "required": ["memories"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
+          },
+          "memories": {
+            "type": "array",
+            "minItems": 1,
+            "description": "List of memory payloads to store.",
+            "items": {
+              "type": "object",
+              "required": ["content"],
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text content to store."
+                },
+                "source": {
+                  "type": "string",
+                  "description": "Provenance label."
+                },
+                "force": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "If true, bypass salience threshold and store unconditionally."
+                },
+                "metadata": {
+                  "type": "object",
+                  "description": "Metadata bag for this individual memory.",
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+          "results": {
+            "type": "array",
+            "description": "Outcomes corresponding to each input memory in order.",
+            "items": {
+              "type": "object",
+              "required": ["status"],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "New memory identifier if stored or queued."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": ["stored", "duplicate", "below_threshold", "queued"],
+                  "description": "Outcome of storing this memory."
+                },
+                "event_id": {
+                  "type": "string",
+                  "description": "Optional async event reference if status is 'queued'."
+                }
+              }
+            }
           }
         }
       }
