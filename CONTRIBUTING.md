@@ -4,21 +4,15 @@ AMP is an open specification — contributions to the spec, compliance suite, do
 
 ## Ways to Contribute
 
-### Discuss an Open Question
-
-Section 9 of the spec lists open design questions that will be resolved through community input. Each question has a corresponding GitHub issue labeled [`open-question`](https://github.com/smriti-memcore/amp/labels/open-question). Add your perspective there.
-
-### Report a Spec Wording Issue
-
-If any part of the spec is ambiguous, contradictory, or unclear, open an issue using the **Bug / Spec Wording** template. Clear language matters as much as correct logic.
-
 ### Build a Conformant Backend
 
 The highest-value contribution is a new AMP-conformant memory backend. If you build one:
 
-1. Run the compliance suite against it (see below)
-2. Open an issue using the **New Implementation** template
-3. We'll link it from the README under "Conformant Backends"
+1. Read [spec/amp-v1.1.md](spec/amp-v1.1.md) §2 (data model) and §3 (protocol).
+2. Pick a conformance level — **Core** (4 verbs) is fine to start; **Full** (8 verbs) is required for MXF interop and consolidation.
+3. Run the compliance suite against it (see below).
+4. Open an issue using the **New Implementation** template.
+5. We'll link it from the README under "Conformant Backends."
 
 #### Running the compliance suite
 
@@ -27,19 +21,41 @@ pip install pytest
 pytest compliance/test_amp_server.py --server-cmd "python3 your_server.py"
 ```
 
-The suite runs the full MCP handshake and tests all Core verbs. Pass `--full` (not yet implemented — see open items) to test Full-conformance verbs too.
+The suite runs the full MCP handshake and exercises 67 tests including scope validation, error mapping (`§3.5`), MCP tool annotations (`§3.4`), content fidelity, namespace isolation, deprecated-field round-trip, and `amp.export`/`amp.import` semantics (when advertised). Tests for Full-only verbs auto-skip on Core backends that respond `not_supported`.
 
 ### Improve the Compliance Suite
 
-- Add test cases for edge cases not yet covered
-- Add a `--full` flag to gate Full-conformance tests separately from Core
-- Port the suite to TypeScript or Go for non-Python server authors
+- Add edge-case tests not yet covered (off-by-one on `top_k`, unicode in `content`, very large `metadata`, conflicting deprecated + native fields…).
+- Write a **REST-channel conformance runner**. The suite today is MCP-only; the REST channel defined in `schema/amp-openapi.yaml` has no automated conformance check. A schemathesis or Dredd run against a reference server would close this gap.
+- Port the suite to **TypeScript** or **Go** so non-Python server authors can self-test.
 
-### Propose a Spec Change
+### Report a Spec Wording Issue
 
-1. Open a discussion issue first — describe the problem and proposed change
-2. Wait for maintainer feedback before writing a PR
-3. PRs that change normative spec language (`MUST`, `SHOULD`, `MAY`) require at least one implementation to demonstrate feasibility
+If any part of the spec is ambiguous, contradictory, or unclear, open an issue using the **Bug / Spec Wording** template. Clear language matters as much as correct logic — the v1.1 revision rewrote §5 (visibility migration) specifically because the v1.0 wording was a one-sentence handwave that produced different end-states across backends.
+
+### Propose a v1.2 Feature
+
+v1.1 is stable; v1.2 is open for design. The known gaps (none blocking adoption, all worth solving) are:
+
+| Topic | One-line scope |
+|---|---|
+| **Authentication & authorization** | API keys / OAuth / JWT story for the REST channel; per-scope ACLs |
+| **`amp.update`** | Amend a memory's content, metadata, or scope without losing its `id` or graph edges |
+| **Idempotency keys** | `Idempotency-Key` on `amp.encode` so retries don't duplicate |
+| **Bulk encode** | Multi-row encode without 30 round-trips |
+| **Change feeds / subscriptions** | SSE or webhook channel so agents in shared scopes can react to writes by other agents |
+| **Metadata filters in `RecallFilters`** | Predicate over reserved-vocabulary keys (`amp.confidence`, `amp.entities`, `amp.categories`) |
+| **Capability discovery** | `GET /v1/capabilities` exposing per-verb support (finer-grained than `amp_conformance: core|full`) |
+| **gRPC stubs** | The spec mentions gRPC; only OpenAPI ships today |
+| **MCP tool annotations beyond the four hints** | Once the MCP spec adds more, e.g. cost / latency hints |
+| **MXF embedding portability** | Decide whether embeddings travel in MXF, and how to negotiate model compatibility |
+| **Collaborative scope conflict resolution** | Two agents writing to the same `workspace_id` — LWW? CRDT? Causality? |
+
+Process:
+
+1. Open a **discussion issue first** — describe the use case, the proposed API surface, and at least one alternative you considered.
+2. Wait for maintainer feedback before writing a spec PR.
+3. PRs that change normative spec language (`MUST`, `SHOULD`, `MAY`) require **at least one prototype implementation** in the same PR (or a follow-up linked PR) to demonstrate feasibility.
 
 ## What's Available to Pick Up
 
@@ -47,31 +63,36 @@ The suite runs the full MCP handshake and tests all Core verbs. Pass `--full` (n
 |------|-----------|-------|
 | Redis Core-conformant backend | Easy | `good-first-issue` |
 | Mem0 / Zep wrapper | Medium | `new-implementation` |
+| Postgres + pgvector Core backend | Medium | `new-implementation` |
+| Add `amp.export` / `amp.import` to `python/amp-server/` | Easy-Medium | `good-first-issue` |
+| Rewrite `examples/minimal_server.py` to v1.1 native | Easy | `good-first-issue` |
+| FastAPI front-end exposing the REST channel from `python/amp-server/` | Medium | `new-implementation` |
 | TypeScript compliance runner | Medium | `tooling` |
 | Go compliance runner | Medium | `tooling` |
-| Discuss open questions §9 | Any | `open-question` |
-| `amp-server` PyPI publish | Easy | `tooling` |
-| `amp.update` verb proposal | Hard | `open-question` |
+| REST-channel conformance suite (schemathesis / Dredd) | Medium | `tooling` |
+| Any v1.2 topic from the table above | Hard | `v1.2-design` |
 
 ## Repository Structure
 
 ```
 amp/
-├── spec/amp-v1.0.md        # The specification (normative)
-├── schema/amp.json         # JSON Schema for all AMP tools
-├── compliance/             # Compliance test suite (pytest)
-│   └── test_amp_server.py
-├── examples/               # Example implementations
-│   └── minimal_server.py   # Minimal Core-conformant server (stdlib only)
-└── python/                 # Python reference implementation
-    └── amp-server/         # smriti-memcore AMP wrapper (Full-conformant)
+├── spec/amp-v1.1.md                # The specification (normative)
+├── spec/amp-v1.0.md                # Historical — v1.0 (superseded)
+├── schema/amp.json                 # JSON Schema for all AMP verbs (MCP channel)
+├── schema/amp-openapi.yaml         # OpenAPI 3.0 contract (REST channel)
+├── compliance/test_amp_server.py   # 67-test compliance suite (pytest, raw MCP)
+├── docs/MIGRATING-v1.0-to-v1.1.md  # v1.0→v1.1 migration walkthrough
+├── examples/minimal_server.py      # Minimal MCP server (v1.0-style; pending rewrite)
+└── python/amp-server/              # Full-conformant Python reference impl
+    └── src/amp_server/server.py    # smriti-memcore wrapper
 ```
 
 ## Code Style
 
-- Python: standard library where possible; `mcp` SDK for production servers
-- Tests: pytest; no mocking of the MCP wire protocol — tests speak raw JSON-RPC over stdio
-- Spec: Markdown; use `MUST` / `SHOULD` / `MAY` per RFC 2119
+- **Python:** standard library where possible; `mcp` SDK for production servers.
+- **Tests:** pytest; no mocking of the MCP wire protocol — tests speak raw JSON-RPC over stdio.
+- **Spec:** Markdown; use `MUST` / `SHOULD` / `MAY` per RFC 2119. Reserved metadata keys are namespaced under `amp.*`.
+- **Error model:** every protocol error MUST carry an `amp_error_code` payload per §3.5. Don't invent ad-hoc error shapes.
 
 ## License
 
