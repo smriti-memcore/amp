@@ -465,7 +465,7 @@ class TestMissingRequiredFields:
         assert "error" in resp, "amp.stats with missing agent_id must return an error"
 
     def test_invalid_request_maps_to_minus_32602(self, client, agent_id):
-        """Per spec §3.4, invalid_request → JSON-RPC -32602 (Invalid params).
+        """Per spec §3.5, invalid_request → JSON-RPC -32602 (Invalid params).
 
         Backends may also use -32600 for malformed JSON-RPC frames, but a
         well-formed call with a missing required parameter is a parameter
@@ -639,7 +639,7 @@ class TestScopeValidation:
 
 
 class TestErrorMapping:
-    """Spec section 3.4 -- strict 1:1 mapping between amp_error_code and JSON-RPC code."""
+    """Spec section 3.5 -- strict 1:1 mapping between amp_error_code and JSON-RPC code."""
 
     def test_not_found_returned_as_status_or_minus_32001(self, client, agent_id):
         resp = client.call_tool("amp.forget", {"agent_id": agent_id, "id": "does-not-exist"})
@@ -652,7 +652,7 @@ class TestErrorMapping:
         assert "error" in resp
         data = resp["error"].get("data") or {}
         assert "amp_error_code" in data, \
-            f"error.data must include amp_error_code per section 3.4; got data={data!r}"
+            f"error.data must include amp_error_code per section 3.5; got data={data!r}"
         assert data["amp_error_code"] in (
             "invalid_request", "not_found", "not_supported", "backend_error"
         )
@@ -691,3 +691,97 @@ class TestDeprecatedVisibilityEcho:
         })
         assert resp.get("status") == "stored"
         assert resp.get("visibility") == "shared"
+
+
+# -- MCP Tool Annotations (spec section 3.4) ---------------------------------
+
+# Expected annotation values per spec section 3.4 verb table. Kept in this file
+# rather than imported so the compliance suite remains self-contained — any
+# backend claiming v1.1 conformance must publish these exact hints.
+EXPECTED_ANNOTATIONS = {
+    "amp.encode":      {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    "amp.recall":      {"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": False},
+    "amp.forget":      {"readOnlyHint": False, "destructiveHint": True,  "idempotentHint": True,  "openWorldHint": False},
+    "amp.consolidate": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+    "amp.pin":         {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True,  "openWorldHint": False},
+    "amp.stats":       {"readOnlyHint": True,  "destructiveHint": False, "idempotentHint": True,  "openWorldHint": False},
+}
+
+
+class TestToolAnnotations:
+    """MCP 2025-03-26 tool annotations (spec section 3.4).
+
+    AMP v1.1 servers MUST publish ToolAnnotations on every verb so hosts can
+    consistently gate destructive verbs, cache read-only results, and surface
+    catalogs. Per the MCP spec these are hints, not enforced contracts —
+    backends still validate server-side — but the published values themselves
+    are conformance-relevant: a server claiming amp.recall is NOT read-only,
+    or amp.forget is NOT destructive, would mislead every host that consumes
+    the manifest.
+    """
+
+    def _tools_by_name(self, client):
+        resp = client._send("tools/list", {})
+        tools = resp.get("result", {}).get("tools", [])
+        return {t["name"]: t for t in tools}
+
+    def test_every_amp_tool_publishes_annotations(self, client):
+        tools = self._tools_by_name(client)
+        for verb in EXPECTED_ANNOTATIONS:
+            assert verb in tools, f"tools/list missing required verb: {verb}"
+            ann = tools[verb].get("annotations")
+            assert ann is not None, (
+                f"{verb} MUST publish a ToolAnnotations block per spec section 3.4"
+            )
+
+    def test_annotation_hint_values_match_spec(self, client):
+        tools = self._tools_by_name(client)
+        for verb, expected in EXPECTED_ANNOTATIONS.items():
+            ann = tools[verb].get("annotations") or {}
+            for hint, want in expected.items():
+                got = ann.get(hint)
+                assert got == want, (
+                    f"{verb}.{hint} MUST be {want} per spec section 3.4 verb table; "
+                    f"got {got!r}"
+                )
+
+    def test_only_amp_forget_is_destructive(self, client):
+        """Destructive hint is the most safety-critical annotation; the table
+        in section 3.4 names only amp.forget. A backend that flags any other
+        verb destructive will cause hosts to gate it behind a confirmation
+        prompt that should not exist."""
+        tools = self._tools_by_name(client)
+        for verb in EXPECTED_ANNOTATIONS:
+            destructive = (tools[verb].get("annotations") or {}).get("destructiveHint")
+            if verb == "amp.forget":
+                assert destructive is True, "amp.forget MUST be flagged destructive"
+            else:
+                assert destructive is False, (
+                    f"{verb} MUST NOT be flagged destructive (only amp.forget is)"
+                )
+
+    def test_read_only_verbs(self, client):
+        """recall, stats (and, when present, export) are the only read-only verbs."""
+        tools = self._tools_by_name(client)
+        for verb, expected in EXPECTED_ANNOTATIONS.items():
+            ro = (tools[verb].get("annotations") or {}).get("readOnlyHint")
+            assert ro == expected["readOnlyHint"], (
+                f"{verb}.readOnlyHint mismatch: want {expected['readOnlyHint']}, got {ro}"
+            )
+
+    def test_export_and_import_annotations_when_present(self, client):
+        """amp.export and amp.import are Full-conformance verbs; backends that
+        ship them MUST publish the section 3.4 annotation values."""
+        tools = self._tools_by_name(client)
+        if "amp.export" in tools:
+            ann = tools["amp.export"].get("annotations") or {}
+            assert ann.get("readOnlyHint") is True
+            assert ann.get("destructiveHint") is False
+            assert ann.get("idempotentHint") is True
+            assert ann.get("openWorldHint") is False
+        if "amp.import" in tools:
+            ann = tools["amp.import"].get("annotations") or {}
+            assert ann.get("readOnlyHint") is False
+            assert ann.get("destructiveHint") is False
+            assert ann.get("idempotentHint") is False
+            assert ann.get("openWorldHint") is False

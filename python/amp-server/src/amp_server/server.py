@@ -37,8 +37,8 @@ mcp = FastMCP(
     ),
 )
 
-# ── §3.4 Error mapping ────────────────────────────────────────────────────────
-# AmpErrorCode → JSON-RPC code (per spec/amp-v1.1.md §3.4)
+# ── §3.5 Error mapping ────────────────────────────────────────────────────────
+# AmpErrorCode → JSON-RPC code (per spec/amp-v1.1.md §3.5)
 #   invalid_request → -32602 (Invalid params — preferred over -32600 which is reserved
 #                              for transport-level malformed JSON-RPC frames)
 #   not_found       → -32001
@@ -57,7 +57,7 @@ class AmpToolError(Exception):
     """Raised from inside a tool to signal a structured AMP error.
 
     The handler-level interceptor (custom_call_tool_handler) translates this
-    into an McpError whose JSON-RPC code matches the §3.4 mapping table and
+    into an McpError whose JSON-RPC code matches the §3.5 mapping table and
     whose `data` field carries the AmpErrorData payload.
     """
 
@@ -82,7 +82,7 @@ def custom_impl_init(self, *args, **kwargs):
 types.Implementation.__init__ = custom_impl_init
 
 # Monkeypatch CallToolRequest handler to translate tool exceptions/error results
-# into JSON-RPC error frames using the §3.4 mapping table. Tool functions that
+# into JSON-RPC error frames using the §3.5 mapping table. Tool functions that
 # raise AmpToolError emit the structured error; any other failure mode falls
 # back to backend_error (-32000).
 original_call_tool_handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
@@ -124,7 +124,7 @@ def _extract_amp_error_from_text(text: str) -> Optional[Tuple[str, str]]:
 
     # Pydantic validation errors raised by FastMCP's argument parser before
     # the tool body executes. These are always parameter-shape problems →
-    # invalid_request per §3.4.
+    # invalid_request per §3.5.
     if "validation error" in text.lower() or "field required" in text.lower():
         return "invalid_request", text
 
@@ -282,7 +282,17 @@ def _memory_to_result(
 
 # ── amp.encode ────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="amp.encode", description="Store a new memory for an agent.")
+@mcp.tool(
+    name="amp.encode",
+    description="Store a new memory for an agent.",
+    annotations=types.ToolAnnotations(
+        title="Encode Memory",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
 def amp_encode(
     content: str,
     agent_id: Optional[str] = None,
@@ -293,7 +303,7 @@ def amp_encode(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not isinstance(content, str) or not content.strip():
-        # Per §3.4, empty/missing content is invalid_request, not below_threshold.
+        # Per §3.5, empty/missing content is invalid_request, not below_threshold.
         # Below_threshold remains the salience-gate outcome (handled below).
         raise AmpToolError("invalid_request", "content must be a non-empty string")
 
@@ -325,7 +335,17 @@ def amp_encode(
 
 # ── amp.recall ────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="amp.recall", description="Retrieve memories relevant to a query.")
+@mcp.tool(
+    name="amp.recall",
+    description="Retrieve memories relevant to a query.",
+    annotations=types.ToolAnnotations(
+        title="Recall Memories",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 def amp_recall(
     query: str,
     agent_id: Optional[str] = None,
@@ -358,7 +378,17 @@ def amp_recall(
 
 # ── amp.forget ────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="amp.forget", description="Permanently delete a memory.")
+@mcp.tool(
+    name="amp.forget",
+    description="Permanently delete a memory.",
+    annotations=types.ToolAnnotations(
+        title="Forget Memory",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 def amp_forget(
     id: str,
     agent_id: Optional[str] = None,
@@ -377,7 +407,17 @@ def amp_forget(
 
 # ── amp.consolidate ───────────────────────────────────────────────────────────
 
-@mcp.tool(name="amp.consolidate", description="Trigger backend consolidation.")
+@mcp.tool(
+    name="amp.consolidate",
+    description="Trigger backend consolidation.",
+    annotations=types.ToolAnnotations(
+        title="Consolidate Memories",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+)
 def amp_consolidate(
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
@@ -392,7 +432,17 @@ def amp_consolidate(
 
 # ── amp.pin ───────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="amp.pin", description="Mark a memory as permanent.")
+@mcp.tool(
+    name="amp.pin",
+    description="Mark a memory as permanent.",
+    annotations=types.ToolAnnotations(
+        title="Pin Memory",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 def amp_pin(
     id: str,
     agent_id: Optional[str] = None,
@@ -411,7 +461,17 @@ def amp_pin(
 
 # ── amp.stats ─────────────────────────────────────────────────────────────────
 
-@mcp.tool(name="amp.stats", description="Return backend statistics for an agent namespace.")
+@mcp.tool(
+    name="amp.stats",
+    description="Return backend statistics for an agent namespace.",
+    annotations=types.ToolAnnotations(
+        title="Backend Statistics",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
 def amp_stats(
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,

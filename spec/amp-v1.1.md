@@ -312,7 +312,26 @@ Retrieve counts and backend metrics for a specific partition.
 
 ---
 
-### 3.4 Error Handling & Protocol Mappings
+### 3.4 MCP Tool Annotations
+
+Per MCP revision 2025-03-26, every tool declaration carries a `ToolAnnotations` block that hints to the host how to gate, cache, and surface that tool. AMP v1.1 servers MUST publish these annotations on every verb so hosts can apply consistent policy (e.g. require user confirmation for destructive verbs, cache read-only results, batch idempotent calls). Per the MCP spec these are HINTS, not enforced contracts — backends MUST still validate inputs and authorise calls server-side.
+
+| Verb              | readOnlyHint | destructiveHint | idempotentHint | openWorldHint | Rationale |
+|-------------------|--------------|-----------------|----------------|---------------|-----------|
+| `amp.encode`      | false | false | false | false | Mutates store. Each call creates a new memory `id`, so repeated calls produce distinct rows (not idempotent). |
+| `amp.recall`      | true  | false | true  | false | Pure read against the partition. Safe to cache for short windows. |
+| `amp.forget`      | false | **true**  | true  | false | Deletes a memory. Idempotent because re-forgetting returns `not_found` rather than erroring; hosts SHOULD still gate the first call. |
+| `amp.consolidate` | false | false | false | **true**  | Background graph mutation. Each pass operates on an evolving state; results depend on accumulated episode-buffer contents and (optionally) external LLM calls. |
+| `amp.pin`         | false | false | true  | false | Marks a memory permanent. Pinning twice is the same as pinning once. |
+| `amp.stats`       | true  | false | true  | false | Pure read of backend counters. |
+| `amp.export`      | true  | false | true  | false | Read-only bulk dump (Harness-only). Idempotent: the same cursor against the same backend resumes at the same position. |
+| `amp.import`      | false | false | false | false | Mutates store. Not idempotent in the general case — `on_conflict=skip` makes a single MXF document round-trippable, but two distinct documents with overlapping content produce different end-states than the union would. |
+
+**Harness-only verbs.** `amp.consolidate`, `amp.stats`, `amp.export`, and `amp.import` are Harness-tier system verbs and SHOULD NOT be projected through the MCP Adapter to the LLM unless the host explicitly grants bulk-read or admin access. The annotations above describe the verbs themselves, not the access policy.
+
+---
+
+### 3.5 Error Handling & Protocol Mappings
 
 To maintain complete parity between the **MCP Adapter Channel** (which uses JSON-RPC error frames) and the **Standalone REST/gRPC Channel** (which uses standard network protocol statuses), AMP v1.1 defines a strict 1-to-1 mapping between canonical error codes, JSON-RPC numbers, and HTTP status codes.
 
@@ -344,15 +363,46 @@ To resolve the "wild-west" of proprietary metadata formats, AMP v1.1 defines sta
 
 ## 5. Backward Compatibility & Deprecations
 
-To ensure seamless integration for legacy client applications built against the AMP v1.0 specification, v1.1 retains two core scoping primitives in a deprecated state. Backward-compatible backends MUST gracefully parse and handle these fields:
+v1.0 modelled access control as a flat `agent_id` partition with a per-memory `private` boolean and a `visibility ∈ {"private","shared"}` field. v1.1 replaces this entire mechanism with the multi-dimensional `scope` object (§2.3): partitioning is structural, not flag-based. `private` and `visibility` are retained as **deprecated input/output fields** for one minor revision so existing v1.0 clients keep working unchanged. They are scheduled for removal in **AMP v1.2** — backends MAY drop them at any v1.2-conformant release.
 
-1. **`private` (boolean, input parameter to `amp.encode`):**
-   - **Legacy Semantics:** Used to determine whether a memory was private to an agent or shared across the application.
-   - **v1.1 Mapping:** Backends should interpret `private: true` as a directive to scope the memory locally if no explicit `scope` is provided. If `scope` is present, `private` is ignored.
+### 5.1 The migration question v1.0 leaves on the table
 
-2. **`visibility` (string `["private", "shared"]`, field in `MemoryResult`, `EncodeResponse`, and `RecallFilters`):**
-   - **Legacy Semantics:** Controlled accessibility partitioning.
-   - **v1.1 Mapping:** `MemoryResult` and `EncodeResponse` payloads emitted by v1.1 servers may populate `visibility: "shared"` (or `"private"`) to avoid breaking client-side parser schemas that enforce this property. Likewise, `RecallFilters` gracefully parses `visibility` but ignores it or translates it to scope constraints.
+A v1.0 caller writing `private: true` means *"only the calling agent can read this back."* There is no v1.1 field with exactly that meaning — v1.1 has no "private to me" notion, only structural scope partitioning. A faithful v1.1 mapping therefore depends on **what the v1.0 client thought "me" was**, which the protocol never made explicit. Backends MUST choose one of the two mappings below and document the choice in their conformance manifest (e.g. via an `amp.legacy_private_strategy` server-info field).
+
+### 5.2 Two conformant mappings for `private: true`
+
+A v1.1 backend handling a legacy v1.0 `amp.encode` call (one carrying flat `agent_id` and `private` but no `scope`) MUST resolve the encode under one of these two strategies:
+
+**Strategy A — Agent-private (default).**
+Map `private: true` to the same `agent_id`-only scope as `private: false`. Both end up as `{"scope": {"agent_id": <agent_id>}}`; the `private` flag is treated purely as a hint and the response echoes `visibility` for v1.0 wire-compat. This is **lossless** for any v1.0 deployment where `agent_id` was already the unit of privacy (single-agent assistants, agent-per-user setups, every v1.0 deployment that didn't use `private` for cross-agent isolation within a shared namespace). It's the recommended default because it never silently elevates scope.
+
+**Strategy B — User-private (opt-in).**
+When the v1.0 caller's intent is *"private to the end user inside a shared agent namespace"* (e.g. one customer-support bot serving many users, where `private: true` meant "this fact belongs to this user only"), the backend MUST require the caller to also supply a `user_id` either alongside `agent_id` or via a sticky session binding established at handshake. The encode is then routed to `{"scope": {"agent_id": <agent_id>, "user_id": <user_id>}}` for `private: true` and `{"scope": {"agent_id": <agent_id>}}` for `private: false`. Backends MUST NOT silently invent a `user_id` (e.g. from the caller's IP, JWT subject, or a hash) — that would change ownership semantics under the v1.0 client's feet. If `user_id` cannot be resolved deterministically, the backend MUST fall back to Strategy A and SHOULD log a one-shot warning.
+
+### 5.3 Recall behaviour on legacy fields
+
+A v1.0 caller passing `RecallFilters.visibility = "private"` against a Strategy-A backend MUST be served the same result set as a v1.1 recall with `{"scope": {"agent_id": <agent_id>}}` and no additional filter — i.e. the visibility filter is a no-op, because every memory in that partition is "private" in the v1.0 sense. A Strategy-B backend MUST apply the additional `user_id` constraint. In both cases the recall MUST NOT error on the deprecated filter; ignoring it silently is the wrong behaviour and the spec previously left this ambiguous.
+
+### 5.4 Deprecated-field echo discipline
+
+v1.1-native callers (those that supply `scope` and omit `private`) MUST receive responses that omit `visibility`. v1.0-native callers (those that supply `private` and omit `scope`) MUST receive responses that include `visibility` populated as `"private"` or `"shared"` mirroring the `private` they sent. This means a v1.1 server emits both shapes depending on the call — the deprecation discipline is observable by the caller, not statically determined by the server.
+
+For `MemoryResult` rows emitted during recall, the rule is: include `visibility` only when the caller's recall request itself referenced `visibility` (in `RecallFilters` or the legacy v1.0 client header `X-AMP-Compat: v1.0`). Otherwise omit it. This keeps v1.1-native consumers free of deprecated payload noise.
+
+### 5.5 Deprecation timeline
+
+| Field | Behaviour in v1.1 | Behaviour in v1.2 |
+|---|---|---|
+| `private` (input to `amp.encode`) | Accepted, mapped per Strategy A or B above | MUST be rejected with `invalid_request` |
+| `visibility` (output on `MemoryResult` / `EncodeResponse`) | Echoed only when the caller's request used legacy shapes | MUST NOT be emitted |
+| `visibility` (input to `RecallFilters`) | Accepted, applied as a no-op (Strategy A) or `user_id` constraint (Strategy B) | MUST be rejected with `invalid_request` |
+| Flat `agent_id` at request root (instead of `scope.agent_id`) | Accepted, promoted to `scope.agent_id` | Accepted (this one stays — flat `agent_id` is a convenience alias, not a separate semantic) |
+
+Backends targeting v1.1 SHOULD log a structured deprecation warning the first time a deprecated field is accepted from a given caller identity, so operators can track v1.0 client migration progress.
+
+### 5.6 Inside collaborative scopes — see Appendix B
+
+The above governs v1.0→v1.1 **migration**. Once on v1.1, the question *"how do I store something private to one user within a shared workspace"* is answered structurally by intersection scoping; see Appendix B.1 for the recipe. The deprecated `private` flag has no role inside a v1.1-native call.
 
 ---
 

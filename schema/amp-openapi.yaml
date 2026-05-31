@@ -7,7 +7,7 @@ info:
     as a robust service layer, independent of the Model Context Protocol (MCP) transport.
 
     Error model: every non-2xx response body conforms to `ErrorResponse`
-    (`amp_error_code` + `message`). Per spec §3.4, the field name and enum match
+    (`amp_error_code` + `message`). Per spec §3.5, the field name and enum match
     the JSON Schema `AmpErrorData` definition exactly so the two channels share
     one wire shape. HTTP status mapping:
 
