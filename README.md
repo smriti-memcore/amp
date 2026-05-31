@@ -118,7 +118,7 @@ If you're building an AMP-conformant backend:
 
 **v1.1 — Stable.** Spec and reference implementation released 2026-05-31. Compliance suite at 86 tests, all passing against the reference server.
 
-**v1.2-draft — In progress.** Spec extensions tracked in [spec/amp-v1.1.md](spec/amp-v1.1.md): Appendix C ships now (REST routing + gRPC `MemoryService` Protobuf contract), plus `amp.provenance.*` and `amp.lineage.*` reserved metadata keys in §4. The `amp.update` and `amp.batch_encode` verbs and metadata filtering in `RecallFilters` are landing across follow-up PRs alongside their reference-server implementations. v1.1-conformant backends remain conformant — v1.2-draft adds capability without breaking the v1.1 surface.
+**v1.2-draft — In progress.** Spec extensions tracked in [spec/amp-v1.1.md](spec/amp-v1.1.md). **Landed so far:** Appendix C (REST routing + gRPC `MemoryService` Protobuf contract), `amp.provenance.*` / `amp.lineage.*` reserved metadata keys, and `amp.update` (v1.2-draft verb with reference-server implementation + 12 compliance tests; 98/98 total). `amp.batch_encode` and metadata filtering in `RecallFilters` follow in subsequent PRs. v1.1-conformant backends remain conformant — v1.2-draft adds capability without breaking the v1.1 surface.
 
 Recent merges:
 - [#1](https://github.com/smriti-memcore/amp/pull/1) — v1.1 dual-delivery, scopes, error mapping
