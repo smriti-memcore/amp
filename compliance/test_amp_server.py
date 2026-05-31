@@ -1863,3 +1863,269 @@ class TestMetadataFiltersErrors:
         assert "error" in resp
         data = resp["error"].get("data") or {}
         assert data.get("amp_error_code") == "invalid_request"
+
+
+class TestRecallTopKOversampling:
+    """Regression for the v1.2 oversampling rule (spec §3.2.2.1 'top_k semantics
+    under post-retrieval filtering'): a selective filter MUST NOT eat into the
+    caller's top_k budget. PR F fix.
+    """
+
+    def test_top_k_one_with_metadata_filter_returns_matching_lower_rank(self, client, agent_id):
+        if not _has_verb(client, "amp.recall"):
+            pytest.skip("amp.recall not advertised")
+        # Seed two memories. Both contain the same lexical token so they both
+        # show up in the recall candidate set; only one passes the filter.
+        # Backends that slice top_k=1 BEFORE filtering will return zero rows;
+        # conformant backends oversample and return the matching one.
+        client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "oversample regression token xoversample first row",
+            "force": True,
+            "metadata": {"oversample_tag": "no"},
+        })
+        client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "oversample regression token xoversample second row",
+            "force": True,
+            "metadata": {"oversample_tag": "yes"},
+        })
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xoversample",
+            "top_k": 1,
+            "filters": {"metadata_filters": [
+                {"key": "oversample_tag", "operator": "eq", "value": "yes"},
+            ]},
+        })
+        assert "error" not in resp, resp
+        results = resp["results"]
+        assert len(results) == 1, (
+            f"top_k=1 must return the rank-2 match when rank-1 fails the filter; "
+            f"got {len(results)} results -- backend is slicing before filtering"
+        )
+        meta = results[0].get("metadata") or {}
+        assert meta.get("oversample_tag") == "yes"
+
+
+class TestMetadataFiltersNeTypeMismatch:
+    """Regression: `ne` MUST return False on type mismatch (silent miss),
+    matching the documented behaviour of every other operator in §3.2.2.1.
+    PR F fix.
+    """
+
+    def _seed(self, client, agent_id, rows):
+        for tag, md in rows:
+            enc = client.call_tool("amp.encode", {
+                "agent_id": agent_id,
+                "content": f"ne mismatch test {tag}",
+                "force": True,
+                "metadata": md,
+            })
+            assert enc.get("status") == "stored", enc
+
+    def _recall_tags(self, client, agent_id, filters):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "ne mismatch test",
+            "top_k": 50,
+            "filters": {"metadata_filters": filters},
+        })
+        assert "error" not in resp, resp
+        return [
+            (r.get("content") or "")[len("ne mismatch test "):]
+            for r in resp["results"]
+            if (r.get("content") or "").startswith("ne mismatch test ")
+        ]
+
+    def test_ne_string_vs_number_is_miss(self, client, agent_id):
+        if not _has_verb(client, "amp.recall"):
+            pytest.skip("amp.recall not advertised")
+        self._seed(client, agent_id, [
+            ("ne_str", {"thing": "42"}),
+            ("ne_num", {"thing": 42}),
+        ])
+        # ne against a number must miss the string row (type mismatch -> miss),
+        # not include it. The numeric row also misses because 42 ne 42 is false.
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "thing", "operator": "ne", "value": 42},
+        ])
+        assert "ne_str" not in tags, (
+            "type-mismatched row leaked through `ne` filter -- silent-miss rule violated"
+        )
+        assert "ne_num" not in tags  # 42 ne 42 -> false
+
+    def test_ne_bool_vs_number_is_miss(self, client, agent_id):
+        self._seed(client, agent_id, [
+            ("ne_bool", {"thing": True}),
+            ("ne_one", {"thing": 1}),
+        ])
+        # ne against True must NOT match the integer 1 (bool/int do not cross-compare).
+        tags = self._recall_tags(client, agent_id, [
+            {"key": "thing", "operator": "ne", "value": True},
+        ])
+        # Both miss: bool row because True ne True is false; int row because of type-family mismatch.
+        assert "ne_bool" not in tags
+        assert "ne_one" not in tags
+
+
+class TestUpdateMergePatchNestedNullDelete:
+    """RFC 7396 §2: when the patch contains a nested object and the target's
+    key is absent (or non-object), the algorithm recurses with `{}` as the
+    sub-target. Nested null-deletes against absent keys MUST be dropped, NOT
+    materialised as `null`. PR F fix.
+    """
+
+    def test_nested_null_against_absent_key_drops_null(self, client, agent_id):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": f"merge nested null xmnn_{uuid.uuid4().hex[:6]}",
+            "force": True,
+            "metadata": {"kept": "value"},
+        })
+        assert enc["status"] == "stored", enc
+        upd = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            # `parent` is not in the stored bag. RFC 7396 says: recurse with {}
+            # as the sub-target, then null-delete drops to no-op. Final stored
+            # value should be `{"parent": {}}` (the now-empty sub-object that
+            # the spec lets backends keep), with NO `null` leaking through.
+            "metadata": {"parent": {"absent_child": None}},
+        })
+        assert upd["status"] in ("updated", "no_change"), upd
+
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xmnn",
+            "top_k": 10,
+        })
+        matched = [r for r in rec["results"] if r["id"] == enc["id"]]
+        assert matched, "memory not found after update"
+        meta = matched[0].get("metadata") or {}
+        # `kept` must still be present.
+        assert meta.get("kept") == "value", f"sibling key lost; metadata={meta}"
+        # `parent` must NOT contain `absent_child: null`. Either `parent` is
+        # absent entirely (also conformant: nothing was added) or is `{}`.
+        parent = meta.get("parent")
+        if parent is not None:
+            assert isinstance(parent, dict), f"parent must be an object; got {parent!r}"
+            assert "absent_child" not in parent, (
+                f"nested null-delete leaked through as literal null; parent={parent!r}"
+            )
+
+    def test_nested_null_against_non_object_target_recurses_with_empty(self, client, agent_id):
+        # If the existing value at `key` is a non-dict (e.g. a string), RFC 7396
+        # still says: target = {}, then merge. Any null in the nested patch is
+        # a no-op against {}.
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": f"merge nested non-object xmno_{uuid.uuid4().hex[:6]}",
+            "force": True,
+            "metadata": {"slot": "was-a-string"},
+        })
+        assert enc["status"] == "stored", enc
+        upd = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            "metadata": {"slot": {"new_child": "added", "ghost": None}},
+        })
+        assert upd["status"] in ("updated", "no_change"), upd
+
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xmno",
+            "top_k": 10,
+        })
+        matched = [r for r in rec["results"] if r["id"] == enc["id"]]
+        assert matched
+        meta = matched[0].get("metadata") or {}
+        slot = meta.get("slot")
+        assert isinstance(slot, dict), f"slot must be an object after merge; got {slot!r}"
+        assert slot.get("new_child") == "added"
+        assert "ghost" not in slot, (
+            f"nested null-delete leaked through; slot={slot!r}"
+        )
+
+
+class TestRecallTimestampFilters:
+    """v1.1 filters.timestamp_after / timestamp_before MUST actually filter
+    rows. Previously a silent gap (validated by the spec but ignored by the
+    reference server). PR F fix.
+    """
+
+    def test_timestamp_after_in_future_returns_nothing(self, client, agent_id):
+        if not _has_verb(client, "amp.recall"):
+            pytest.skip("amp.recall not advertised")
+        client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "timestamp filter test xtsf future",
+            "force": True,
+        })
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xtsf",
+            "top_k": 50,
+            "filters": {"timestamp_after": "2099-01-01T00:00:00Z"},
+        })
+        assert "error" not in resp, resp
+        matching = [
+            r for r in resp["results"]
+            if "xtsf" in (r.get("content") or "")
+        ]
+        assert matching == [], (
+            f"timestamp_after in the future MUST exclude all rows; got {matching}"
+        )
+
+    def test_timestamp_before_in_past_returns_nothing(self, client, agent_id):
+        client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "timestamp filter test xtsfb past",
+            "force": True,
+        })
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xtsfb",
+            "top_k": 50,
+            "filters": {"timestamp_before": "2000-01-01T00:00:00Z"},
+        })
+        assert "error" not in resp, resp
+        matching = [
+            r for r in resp["results"]
+            if "xtsfb" in (r.get("content") or "")
+        ]
+        assert matching == [], (
+            f"timestamp_before in the past MUST exclude all rows; got {matching}"
+        )
+
+    def test_timestamp_after_in_past_returns_match(self, client, agent_id):
+        # Sanity: a permissive after-bound MUST let the row through.
+        client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": "timestamp filter test xtsfp permissive",
+            "force": True,
+        })
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "xtsfp",
+            "top_k": 50,
+            "filters": {"timestamp_after": "2000-01-01T00:00:00Z"},
+        })
+        assert "error" not in resp, resp
+        matching = [
+            r for r in resp["results"]
+            if "xtsfp" in (r.get("content") or "")
+        ]
+        assert matching, "permissive timestamp_after should not exclude rows"
+
+    def test_invalid_timestamp_is_invalid_request(self, client, agent_id):
+        resp = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "anything",
+            "filters": {"timestamp_after": "not-a-timestamp"},
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"

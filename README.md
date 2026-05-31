@@ -118,7 +118,7 @@ If you're building an AMP-conformant backend:
 
 **v1.1 — Stable.** Spec and reference implementation released 2026-05-31. Compliance suite at 86 tests, all passing against the reference server.
 
-**v1.2-draft — In progress.** Spec extensions tracked in [spec/amp-v1.1.md](spec/amp-v1.1.md). **Landed so far:** Appendix C (REST routing + gRPC `MemoryService` Protobuf contract), `amp.provenance.*` / `amp.lineage.*` reserved metadata keys, `amp.update` (RFC 7396 merge-patch semantics), `amp.batch_encode` (multi-row ingest under one shared scope, per-row partial-failure semantics), and structured `metadata_filters` in `RecallFilters` (`eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `contains` over reserved-vocabulary and user-defined keys, strict-AND composition). Compliance suite now at 127 tests, all passing. v1.1-conformant backends remain conformant — v1.2-draft adds capability without breaking the v1.1 surface.
+**v1.2-draft — In progress.** Spec extensions tracked in [spec/amp-v1.1.md](spec/amp-v1.1.md). **Landed so far:** Appendix C (REST routing + gRPC `MemoryService` Protobuf contract), `amp.provenance.*` / `amp.lineage.*` reserved metadata keys, `amp.update` (RFC 7396 merge-patch semantics), `amp.batch_encode` (multi-row ingest under one shared scope, per-row partial-failure semantics), and structured `metadata_filters` in `RecallFilters` (`eq` / `ne` / `gt` / `gte` / `lt` / `lte` / `in` / `contains` over reserved-vocabulary and user-defined keys, strict-AND composition). Compliance suite now at 136 tests, all passing. v1.1-conformant backends remain conformant — v1.2-draft adds capability without breaking the v1.1 surface.
 
 Recent merges:
 - [#1](https://github.com/smriti-memcore/amp/pull/1) — v1.1 dual-delivery, scopes, error mapping

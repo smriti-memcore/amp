@@ -19,7 +19,7 @@ import json
 import logging
 import os
 from binascii import Error as binascii_Error
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from mcp.server.fastmcp import FastMCP
@@ -502,6 +502,67 @@ def amp_batch_encode(
 
 # ── amp.recall ────────────────────────────────────────────────────────────────
 
+# Oversampling budget for post-retrieval filtering. amp.recall MUST not let
+# post-filters truncate the caller's top_k window (PR F fix): we pull a wider
+# candidate pool, filter in vector-rank order, then trim. Factor and cap are
+# heuristic -- backends free to tune.
+_RECALL_OVERSAMPLE_FACTOR = 10
+_RECALL_OVERSAMPLE_MAX = 200
+
+
+def _parse_iso8601(value: Any, *, field: str) -> Optional["datetime"]:
+    """Parse an ISO 8601 timestamp filter into a tz-aware datetime, or None.
+
+    Returns None if value is None/missing. Raises invalid_request on any other
+    non-string or unparseable value. Accepts the 'Z' suffix and naive strings
+    (treated as UTC).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise AmpToolError("invalid_request", f"{field} must be an ISO 8601 string")
+    raw = value.strip()
+    # datetime.fromisoformat in Py3.11+ handles 'Z'; normalise for older interpreters.
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise AmpToolError(
+            "invalid_request", f"{field} is not a valid ISO 8601 timestamp: {exc}"
+        ) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _row_passes_timestamp(
+    result: Dict[str, Any],
+    ts_after: Optional["datetime"],
+    ts_before: Optional["datetime"],
+) -> bool:
+    """Apply timestamp_after / timestamp_before filters to a MemoryResult row.
+
+    Missing/unparseable row timestamps fail the filter (silent miss), matching
+    the metadata_filter discipline -- never raises.
+    """
+    raw = result.get("timestamp")
+    if not isinstance(raw, str) or not raw:
+        return False
+    candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        row_ts = datetime.fromisoformat(candidate)
+    except ValueError:
+        return False
+    if row_ts.tzinfo is None:
+        row_ts = row_ts.replace(tzinfo=timezone.utc)
+    if ts_after is not None and not (row_ts > ts_after):
+        return False
+    if ts_before is not None and not (row_ts < ts_before):
+        return False
+    return True
+
+
 _METADATA_FILTER_OPERATORS = frozenset(
     {"eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"}
 )
@@ -574,8 +635,20 @@ def _eval_metadata_filter(stored: Any, op: str, value: Any) -> bool:
             return False
         return stored == value
     if op == "ne":
+        # Per spec §3.2.2.1 ("Type mismatches"): if the stored runtime type
+        # cannot satisfy the operator, the row is a silent MISS (False), even
+        # for `ne`. Treating type-mismatches as "ne anything = True" would
+        # surface every wrongly-typed row through any ne filter, which is the
+        # same surprise as missing-key-ne-as-True (also forbidden upstream).
         if isinstance(stored, bool) != isinstance(value, bool):
-            return True  # different types => not equal
+            return False
+        # String vs number is also a type-family mismatch -> silent miss.
+        stored_is_num = isinstance(stored, (int, float)) and not isinstance(stored, bool)
+        value_is_num = isinstance(value, (int, float)) and not isinstance(value, bool)
+        stored_is_str = isinstance(stored, str)
+        value_is_str = isinstance(value, str)
+        if (stored_is_num != value_is_num) or (stored_is_str != value_is_str):
+            return False
         return stored != value
     if op in _ORDER_OPERATORS:
         # Order operators only defined for matching scalar types (no bool/int
@@ -660,31 +733,66 @@ def amp_recall(
     # Row-level type mismatches are silent misses (per spec §3.2.2.1) but the
     # request shape itself must be well-formed or we raise invalid_request.
     metadata_filters = None
+    status_filter = None
+    source_filter = None
+    ts_after = None
+    ts_before = None
     if filters:
         metadata_filters = filters.get("metadata_filters")
         if metadata_filters is not None:
             _validate_metadata_filters(metadata_filters)
+        status_filter = filters.get("status")
+        source_filter = filters.get("source")
+        ts_after = _parse_iso8601(
+            filters.get("timestamp_after"), field="filters.timestamp_after"
+        )
+        ts_before = _parse_iso8601(
+            filters.get("timestamp_before"), field="filters.timestamp_before"
+        )
 
     norm_scope = _normalize_scope(scope, agent_id)
     smriti = _get_agent_for_scope(norm_scope)
-    memories = smriti.recall(query, top_k=top_k)
+
+    # Post-retrieval filtering MUST NOT eat into the caller's top_k budget.
+    # If any post-retrieval filter is set we oversample candidates from the
+    # backend, apply filters in vector-rank order, then trim to top_k. The
+    # cap on oversampling keeps this bounded -- a backend with many matches
+    # may still return fewer than top_k rows after filtering, but that's the
+    # honest answer given the post-retrieval-only filtering model.
+    has_post_filter = bool(
+        status_filter
+        or source_filter
+        or ts_after is not None
+        or ts_before is not None
+        or metadata_filters
+    )
+    if has_post_filter:
+        # Heuristic: pull 10x top_k (capped at _RECALL_OVERSAMPLE_MAX) so a
+        # selective filter still has room to return top_k matches.
+        fetch_k = min(max(top_k * _RECALL_OVERSAMPLE_FACTOR, top_k), _RECALL_OVERSAMPLE_MAX)
+    else:
+        fetch_k = top_k
+    memories = smriti.recall(query, top_k=fetch_k)
 
     results = []
     for mem in memories:
         result = _memory_to_result(mem, norm_scope)
-        # Apply status filter post-retrieval (smriti already excludes archived by default)
-        if filters:
-            status_filter = filters.get("status")
+        if has_post_filter:
             if status_filter and result["status"] != status_filter:
                 continue
-            source_filter = filters.get("source")
             if source_filter and result["source"] != source_filter:
+                continue
+            if (ts_after is not None or ts_before is not None) and not _row_passes_timestamp(
+                result, ts_after, ts_before
+            ):
                 continue
             if metadata_filters and not _apply_metadata_filters(
                 result.get("metadata") or {}, metadata_filters
             ):
                 continue
         results.append(result)
+        if len(results) >= top_k:
+            break
 
     return {"results": results}
 
@@ -785,9 +893,16 @@ def amp_pin(
 def _apply_merge_patch(stored: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     """RFC 7396 JSON Merge Patch.
 
-    Returns a new dict (does not mutate `stored`). null in the patch removes a
-    key; nested objects merge recursively; arrays and scalars are replaced
-    wholesale (per the RFC, arrays are NOT merged element-wise).
+    Returns a new dict (does not mutate `stored`). Follows the RFC 7396 §2
+    algorithm verbatim:
+      - If `patch` is not an object, replace target with patch.
+      - For each (key, value) in the patch object:
+          * value == null  -> remove key from target if present (else no-op).
+          * value is dict  -> recursively merge against target[key] if dict, else {}.
+                              (this means nested null-deletes against an absent
+                              target are dropped, not materialised as null.)
+          * else           -> replace target[key] wholesale.
+      - Arrays are NEVER merged element-wise -- they replace.
     """
     if not isinstance(patch, dict):
         # Per RFC 7396, a non-object patch replaces the target entirely.
@@ -796,8 +911,13 @@ def _apply_merge_patch(stored: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
     for key, value in patch.items():
         if value is None:
             result.pop(key, None)
-        elif isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _apply_merge_patch(result[key], value)
+        elif isinstance(value, dict):
+            # RFC 7396: recurse with {} when the current target value is not
+            # itself an object. This is what makes `{"a": {"b": null}}` against
+            # absent `a` produce `{"a": {}}` rather than `{"a": {"b": null}}`.
+            sub_target_raw = result.get(key)
+            sub_target: Dict[str, Any] = sub_target_raw if isinstance(sub_target_raw, dict) else {}
+            result[key] = _apply_merge_patch(sub_target, value)
         else:
             result[key] = value
     return result
