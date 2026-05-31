@@ -3,7 +3,7 @@
 AMP (Agent Memory Protocol) reference server, backed by [smriti-memcore](https://pypi.org/project/smriti-memcore/).
 
 **Transport:** MCP stdio (REST channel TBD — see *Limitations* below).
-**Conformance:** Full — all eight v1.1 verbs implemented.
+**Conformance:** Full (v1.1) + `amp.update` from v1.2-draft — all eight v1.1 verbs plus the v1.2-draft update verb implemented.
 
 ## Install
 
@@ -31,6 +31,7 @@ AMP_STORAGE_PATH=/my/path amp-server   # via environment variable
 | `amp.pin` | Mark a memory as permanent | Full |
 | `amp.export` | Bulk export to MXF NDJSON, with cursor pagination | Full |
 | `amp.import` | Bulk import from MXF NDJSON, with `on_conflict` and `scope_remap` policies | Full |
+| `amp.update` | Mutate `content` and/or `metadata` of an existing memory in place. RFC 7396 JSON Merge Patch semantics by default; opt-in `metadata_mode=replace` for wholesale replacement | v1.2-draft |
 
 The server advertises `amp_conformance: "full"` in its `initialize` response.
 
@@ -117,6 +118,7 @@ Mapping:
 | `amp.stats` | true | false | true | false |
 | `amp.export` | true | false | true | false |
 | `amp.import` | false | false | false | false |
+| `amp.update` | false | false | true | false |
 
 ## Connect to Claude Desktop
 
@@ -158,4 +160,4 @@ pip install pytest
 pytest compliance/test_amp_server.py --server-cmd "$(which amp-server)"
 ```
 
-**86 tests; all pass on the current implementation.** Coverage includes Core verbs, scope validation, error mapping (§3.5), MCP tool annotations (§3.4), MXF export round-trips, cursor resumability, all four `on_conflict` policies (including the `not_supported` return for `fail_atomic`), and both `scope_remap` modes.
+**98 tests; all pass on the current implementation.** Coverage includes Core verbs, scope validation, error mapping (§3.5), MCP tool annotations (§3.4), MXF export round-trips, cursor resumability, all four `on_conflict` policies (including the `not_supported` return for `fail_atomic`), both `scope_remap` modes, and the v1.2-draft `amp.update` verb (content / metadata merge / null-delete / replace mode / no-op / scope isolation / idempotency).

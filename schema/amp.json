@@ -482,6 +482,69 @@
         }
       }
     },
+    "amp.update": {
+      "description": "Mutate the content and/or metadata of an existing memory in place. The memory's id, scope, source, status, and creation_time are preserved; only content and metadata are mutable. Introduced in v1.2-draft.",
+      "annotations": {
+        "title": "Update Memory",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "input": {
+        "type": "object",
+        "required": ["id"],
+        "anyOf": [
+          { "required": ["scope"] },
+          { "required": ["agent_id"] }
+        ],
+        "properties": {
+          "scope": {
+            "$ref": "#/definitions/Scope"
+          },
+          "agent_id": {
+            "type": "string",
+            "description": "Legacy namespace identifier for the calling agent (mapped to scope.agent_id)."
+          },
+          "id": {
+            "type": "string",
+            "description": "ID of the memory to update."
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Replacement content. Omit to leave content unchanged. Empty strings are NOT a delete signal — they are rejected with invalid_request (a memory cannot have empty content)."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Metadata patch. By default applied as a JSON Merge Patch (RFC 7396): keys present in the request are written into the stored metadata bag, keys absent are preserved, and a key whose value is explicit JSON null is removed. Backends MAY offer a 'replace' mode by accepting metadata_mode='replace' (see below)."
+          },
+          "metadata_mode": {
+            "type": "string",
+            "enum": ["merge", "replace"],
+            "default": "merge",
+            "description": "How `metadata` is applied. merge (default) — RFC 7396 JSON Merge Patch semantics. replace — the stored metadata bag is replaced wholesale with the request value. The default is merge because it matches the principle of least surprise for a partial-update verb."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["updated", "not_found", "not_supported", "no_change"],
+            "description": "Outcome of the update operation. 'updated' = the memory was mutated. 'no_change' = request was well-formed but produced no observable change (e.g. content and metadata both omitted, or metadata merge resulted in an identical bag). 'not_found' = id does not exist under the active scope. 'not_supported' = backend does not implement mutation."
+          },
+          "id": {
+            "type": "string",
+            "description": "Echoed memory id. Present on status='updated' and 'no_change' so callers can correlate batched updates with their inputs."
+          }
+        }
+      }
+    },
     "amp.stats": {
       "description": "Return backend statistics for an agent namespace.",
       "annotations": {

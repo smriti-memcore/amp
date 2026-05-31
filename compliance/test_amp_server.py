@@ -1131,3 +1131,237 @@ class TestImportBasic:
         assert resp["failed"] == 1
         # The remaining row should NOT have been counted as imported/skipped.
         assert resp["imported"] + resp["skipped"] + resp["failed"] == 2
+
+
+# -- amp.update (spec section 3.2.4, v1.2-draft) -----------------------------
+
+class TestUpdateBasic:
+    """v1.2-draft amp.update. Backends that don't implement it MUST respond
+    not_supported; tests below auto-skip when the verb isn't advertised."""
+
+    def test_update_skipped_if_not_advertised(self, client):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("backend does not advertise amp.update (v1.2-draft optional)")
+
+    def test_update_content_only(self, client, agent_id):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = encode(client, agent_id, f"original content xup_{uuid.uuid4().hex[:6]}", force=True)
+        assert enc["status"] == "stored"
+        new_content = f"updated content xup2_{uuid.uuid4().hex[:6]}"
+        resp = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"], "content": new_content,
+        })
+        assert "error" not in resp
+        assert resp.get("status") == "updated"
+        assert resp.get("id") == enc["id"]
+        # Recall should now find the new content.
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id, "query": new_content.split()[1],
+        })
+        matched = [m for m in rec.get("results", []) if m["id"] == enc["id"]]
+        assert matched and matched[0]["content"] == new_content, (
+            f"updated content must be reflected in recall: {matched}"
+        )
+
+    def test_update_metadata_merge_default(self, client, agent_id):
+        """RFC 7396 merge: keys in patch overwrite, absent keys preserved."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        # Seed with two metadata keys.
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": f"merge test xmrg_{uuid.uuid4().hex[:6]}",
+            "force": True,
+            "metadata": {"amp.confidence": 0.5, "tag_a": "alpha"},
+        })
+        assert enc["status"] == "stored"
+        # Patch only confidence; tag_a MUST survive.
+        upd = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            "metadata": {"amp.confidence": 0.9},
+        })
+        assert upd.get("status") == "updated"
+        # Recall and inspect the stored metadata.
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id, "query": "merge test xmrg",
+        })
+        matched = [m for m in rec.get("results", []) if m["id"] == enc["id"]]
+        assert matched, "memory must still be retrievable after update"
+        # The backend may surface metadata under "metadata" with backend
+        # extensions mixed in; assert only that our two keys are present and
+        # have the correct values.
+        meta = matched[0].get("metadata") or {}
+        assert meta.get("amp.confidence") == 0.9, (
+            f"merge MUST overwrite confidence to 0.9; got {meta}"
+        )
+        assert meta.get("tag_a") == "alpha", (
+            f"merge MUST preserve tag_a (absent from patch); got {meta}"
+        )
+
+    def test_update_metadata_null_removes_key(self, client, agent_id):
+        """RFC 7396: explicit JSON null in the patch removes the key."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": f"null delete xnul_{uuid.uuid4().hex[:6]}",
+            "force": True,
+            "metadata": {"stale_key": "to_be_removed", "keep_key": "stays"},
+        })
+        assert enc["status"] == "stored"
+        upd = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            "metadata": {"stale_key": None},
+        })
+        assert upd.get("status") == "updated"
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id, "query": "null delete xnul",
+        })
+        matched = [m for m in rec.get("results", []) if m["id"] == enc["id"]]
+        assert matched
+        meta = matched[0].get("metadata") or {}
+        assert "stale_key" not in meta, (
+            f"null in merge patch MUST remove the key; got {meta}"
+        )
+        assert meta.get("keep_key") == "stays"
+
+    def test_update_metadata_replace_mode(self, client, agent_id):
+        """metadata_mode=replace MUST discard keys absent from the patch."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": f"replace test xrep_{uuid.uuid4().hex[:6]}",
+            "force": True,
+            "metadata": {"keep_under_merge": "would-survive", "amp.confidence": 0.4},
+        })
+        assert enc["status"] == "stored"
+        upd = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            "metadata": {"only_key": "present"},
+            "metadata_mode": "replace",
+        })
+        assert upd.get("status") == "updated"
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id, "query": "replace test xrep",
+        })
+        matched = [m for m in rec.get("results", []) if m["id"] == enc["id"]]
+        assert matched
+        meta = matched[0].get("metadata") or {}
+        assert meta.get("only_key") == "present"
+        assert "keep_under_merge" not in meta, (
+            f"replace mode MUST discard absent keys; got {meta}"
+        )
+
+    def test_update_not_found_for_unknown_id(self, client, agent_id):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        resp = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": "does-not-exist", "content": "anything",
+        })
+        assert "error" not in resp
+        assert resp.get("status") == "not_found"
+
+    def test_update_cross_scope_returns_not_found(self, client):
+        """Cross-scope updates MUST return not_found (NOT invalid_request)
+        per spec section 3.2.4: existence info must not leak across scopes."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        scope_a = {"agent_id": f"upd-iso-a-{uuid.uuid4().hex[:8]}"}
+        scope_b = {"agent_id": f"upd-iso-b-{uuid.uuid4().hex[:8]}"}
+        enc = client.call_tool("amp.encode", {
+            "scope": scope_a, "content": "scope A row xupi", "force": True,
+        })
+        resp = client.call_tool("amp.update", {
+            "scope": scope_b, "id": enc["id"], "content": "trespass",
+        })
+        assert "error" not in resp
+        assert resp.get("status") == "not_found", (
+            f"cross-scope update MUST be not_found, not invalid_request; got {resp}"
+        )
+
+    def test_update_no_change_when_patch_is_noop(self, client, agent_id):
+        """Well-formed request that produces no observable change SHOULD return
+        no_change (backends MAY return updated instead -- both conformant per
+        spec section 3.2.4)."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": f"noop test xnoo_{uuid.uuid4().hex[:6]}",
+            "force": True,
+            "metadata": {"k": "v"},
+        })
+        # Patch with the same content + same metadata key -> no-op.
+        resp = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            "content": enc.get("content") or None,  # may be absent in response
+            "metadata": {"k": "v"},
+        })
+        assert "error" not in resp
+        assert resp.get("status") in ("no_change", "updated"), (
+            f"no-op update MUST return no_change or updated; got {resp}"
+        )
+
+    def test_update_empty_content_rejected(self, client, agent_id):
+        """Empty string content MUST be invalid_request -- use amp.forget to delete."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = encode(client, agent_id, f"empty content reject xemp_{uuid.uuid4().hex[:6]}", force=True)
+        resp = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"], "content": "",
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_update_invalid_metadata_mode(self, client, agent_id):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = encode(client, agent_id, f"bad mode xmod_{uuid.uuid4().hex[:6]}", force=True)
+        resp = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"],
+            "metadata": {"k": "v"}, "metadata_mode": "lolwhat",
+        })
+        assert "error" in resp
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_update_is_idempotent(self, client, agent_id):
+        """Applying the same patch twice MUST produce the same end state.
+        First call: updated. Second call: no_change (or updated if the backend
+        doesn't optimise no-ops)."""
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        enc = encode(client, agent_id, f"idempotent xidu_{uuid.uuid4().hex[:6]}", force=True)
+        new_content = f"new content xidu2_{uuid.uuid4().hex[:6]}"
+        first = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"], "content": new_content,
+        })
+        assert first.get("status") == "updated"
+        second = client.call_tool("amp.update", {
+            "agent_id": agent_id, "id": enc["id"], "content": new_content,
+        })
+        assert second.get("status") in ("no_change", "updated")
+        # Either way, the recall must still show new_content.
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id, "query": new_content.split()[2],
+        })
+        matched = [m for m in rec.get("results", []) if m["id"] == enc["id"]]
+        assert matched and matched[0]["content"] == new_content
+
+
+class TestUpdateAnnotations:
+    """When advertised, amp.update MUST publish the §3.4 annotation values."""
+
+    def test_update_annotations_match_spec(self, client):
+        if not _has_verb(client, "amp.update"):
+            pytest.skip("amp.update not advertised")
+        resp = client._send("tools/list", {})
+        tools = {t["name"]: t for t in resp.get("result", {}).get("tools", [])}
+        ann = tools["amp.update"].get("annotations") or {}
+        assert ann.get("readOnlyHint") is False
+        assert ann.get("destructiveHint") is False
+        assert ann.get("idempotentHint") is True
+        assert ann.get("openWorldHint") is False

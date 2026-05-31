@@ -35,7 +35,7 @@ mcp = FastMCP(
     "amp-server",
     instructions=(
         "AMP (Agent Memory Protocol) Full-conformant memory server. "
-        "Implements amp.encode, amp.recall, amp.forget, amp.consolidate, amp.pin, amp.stats."
+        "Implements amp.encode, amp.recall, amp.forget, amp.consolidate, amp.pin, amp.stats, amp.export, amp.import, amp.update."
     ),
 )
 
@@ -258,6 +258,22 @@ def _memory_to_result(
     source = memory.source.value if hasattr(memory.source, "value") else str(memory.source)
     ts = memory.creation_time
     timestamp = ts.isoformat() if isinstance(ts, datetime) else str(ts)
+    # Merge user-defined metadata (stored verbatim — including reserved AMP
+    # keys like amp.confidence, amp.entities, …) with backend-internal hints
+    # (salience, room_id, hops, …). User keys take precedence so caller-
+    # supplied metadata survives a recall round-trip cleanly.
+    stored_metadata = dict(memory.metadata) if isinstance(memory.metadata, dict) else {}
+    backend_metadata = {
+        "salience": memory.salience.composite if memory.salience else None,
+        "room_id": getattr(memory, "room_id", None),
+        "hops": getattr(memory, "hops", 0),
+        "reflection_level": getattr(memory, "reflection_level", 0),
+        "strength": getattr(memory, "strength", 1.0),
+    }
+    # Backend hints fill in where the user hasn't supplied a value; user keys
+    # win on conflict.
+    merged_metadata = {**backend_metadata, **stored_metadata}
+
     result: Dict[str, Any] = {
         "id": memory.id,
         "content": memory.content,
@@ -266,13 +282,7 @@ def _memory_to_result(
         "timestamp": timestamp,
         "status": status,
         "scope": scope,
-        "metadata": {
-            "salience": memory.salience.composite if memory.salience else None,
-            "room_id": getattr(memory, "room_id", None),
-            "hops": getattr(memory, "hops", 0),
-            "reflection_level": getattr(memory, "reflection_level", 0),
-            "strength": getattr(memory, "strength", 1.0),
-        },
+        "metadata": merged_metadata,
     }
     # Echo the deprecated `visibility` field only when the legacy parameter
     # was actually supplied on the encode call — keeps v1.1-native responses
@@ -326,6 +336,25 @@ def amp_encode(
 
     if memory_id is None:
         return {"status": "below_threshold"}
+
+    # Apply caller-supplied metadata onto the newly-created memory. smriti.encode
+    # does not accept a metadata argument, so we patch it post-hoc via the
+    # palace. Reserved AMP keys (amp.confidence, amp.entities, etc.) and any
+    # user-defined keys are written verbatim; backend-internal keys (salience,
+    # room_id, hops, …) on the existing metadata bag are preserved.
+    if metadata is not None and isinstance(metadata, dict) and metadata:
+        stored = smriti.palace.get_memory(memory_id)
+        if stored is not None:
+            existing = dict(stored.metadata) if isinstance(stored.metadata, dict) else {}
+            existing.update(metadata)
+            stored.metadata = existing
+            try:
+                smriti.palace.save()
+            except Exception:
+                # Metadata persistence is best-effort on encode; if it fails
+                # the row is still stored, so we don't fail the call. A
+                # production backend should treat this as a hard error.
+                pass
 
     response: Dict[str, Any] = {"id": memory_id, "status": "stored"}
     # Echo the deprecated visibility only when the legacy `private` parameter
@@ -459,6 +488,120 @@ def amp_pin(
         return {"status": "not_found"}
     smriti.pin(id)
     return {"status": "pinned"}
+
+
+# ── amp.update ────────────────────────────────────────────────────────────────
+#
+# v1.2-draft. Mutate the content and/or metadata of an existing memory in place.
+# The memory's id, scope, source, status, and creation_time are preserved -- only
+# content and metadata are mutable. By default metadata is applied as a JSON
+# Merge Patch (RFC 7396): keys present in the request overwrite; absent keys
+# are preserved; explicit JSON null removes a key. Callers opt into wholesale
+# replacement via metadata_mode="replace".
+
+
+def _apply_merge_patch(stored: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """RFC 7396 JSON Merge Patch.
+
+    Returns a new dict (does not mutate `stored`). null in the patch removes a
+    key; nested objects merge recursively; arrays and scalars are replaced
+    wholesale (per the RFC, arrays are NOT merged element-wise).
+    """
+    if not isinstance(patch, dict):
+        # Per RFC 7396, a non-object patch replaces the target entirely.
+        return patch
+    result = dict(stored) if isinstance(stored, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _apply_merge_patch(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+@mcp.tool(
+    name="amp.update",
+    description="Mutate the content and/or metadata of an existing memory in place (v1.2-draft).",
+    annotations=types.ToolAnnotations(
+        title="Update Memory",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def amp_update(
+    id: str,
+    agent_id: Optional[str] = None,
+    scope: Optional[Dict[str, Any]] = None,
+    content: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    metadata_mode: str = "merge",
+) -> Dict[str, Any]:
+    if not isinstance(id, str) or not id:
+        raise AmpToolError("invalid_request", "id is required")
+
+    # Content semantics: omit to leave unchanged; empty string is rejected per
+    # spec section 3.2.4 (use amp.forget to delete a row).
+    if content is not None:
+        if not isinstance(content, str):
+            raise AmpToolError("invalid_request", "content must be a string")
+        if content == "":
+            raise AmpToolError(
+                "invalid_request",
+                "content cannot be empty; use amp.forget to delete a memory",
+            )
+
+    if metadata is not None and not isinstance(metadata, dict):
+        raise AmpToolError("invalid_request", "metadata must be an object")
+    if metadata_mode not in ("merge", "replace"):
+        raise AmpToolError(
+            "invalid_request",
+            "metadata_mode must be 'merge' or 'replace'",
+        )
+
+    norm_scope = _normalize_scope(scope, agent_id)
+    smriti = _get_agent_for_scope(norm_scope)
+    memory = smriti.palace.get_memory(id)
+    if memory is None:
+        # Cross-scope updates land here too (the scope's palace doesn't carry
+        # the foreign id); per spec section 3.2.4 we return not_found rather
+        # than invalid_request so existence info doesn't leak across scopes.
+        return {"status": "not_found"}
+
+    # Snapshot for change detection.
+    original_content = memory.content
+    original_metadata = dict(memory.metadata) if isinstance(memory.metadata, dict) else {}
+
+    mutated = False
+
+    if content is not None and content != original_content:
+        memory.content = content
+        mutated = True
+
+    if metadata is not None:
+        if metadata_mode == "replace":
+            new_metadata = dict(metadata)
+        else:  # merge
+            new_metadata = _apply_merge_patch(original_metadata, metadata)
+        if new_metadata != original_metadata:
+            # Direct assignment is safe: Memory is a mutable dataclass and the
+            # palace's in-memory map already references this instance.
+            memory.metadata = new_metadata
+            mutated = True
+
+    # Persist if anything changed. palace.save() is a full snapshot — fine for
+    # the reference impl; production backends would do a targeted write.
+    if mutated:
+        try:
+            smriti.palace.save()
+        except Exception as exc:
+            raise AmpToolError("backend_error", f"palace.save failed: {exc}")
+        return {"status": "updated", "id": id}
+
+    return {"status": "no_change", "id": id}
 
 
 # ── amp.stats ─────────────────────────────────────────────────────────────────

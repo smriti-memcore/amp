@@ -237,6 +237,52 @@ Delete a memory.
   }
   ```
 
+#### 3.2.4 amp.update *(v1.2-draft)*
+Mutate the `content` and/or `metadata` of an existing memory in place. The memory's `id`, `scope`, `source`, `status`, and `creation_time` are preserved; only `content` and `metadata` are mutable. Closes the v1.1 gap where a fact correction or a confidence-recomputation forced callers to `forget` + `encode` and lose the original `id` and any graph edges that referenced it.
+
+**Conformance.** Introduced in v1.2-draft. v1.1-conformant backends MAY return `not_supported` (HTTP `501`, JSON-RPC `-32002`). v1.2-conformant backends MUST implement it.
+
+**Annotations** (per §3.4 verb table): `readOnlyHint=false`, `destructiveHint=false`, `idempotentHint=true`, `openWorldHint=false`. Update is idempotent because applying the same patch twice produces the same end state.
+
+**Metadata merge vs replace.** By default `metadata` is applied as a JSON Merge Patch ([RFC 7396](https://www.rfc-editor.org/rfc/rfc7396)):
+
+1. Keys present in the request are written into the stored metadata bag.
+2. Keys absent from the request are preserved.
+3. A key whose value is explicit JSON `null` is removed.
+
+This matches the principle of least surprise for a partial-update verb and is what every other "patch" API in the wild does (Stripe, Notion, GitHub). Callers that want wholesale replacement opt in with `metadata_mode: "replace"`, which writes the request value verbatim — silently discarding any keys not present in the patch. Backends MUST NOT default to replace semantics; the data-loss surface is too easy to trigger by accident.
+
+**Content semantics.** Omit `content` to leave it unchanged. An empty string is **not** a delete signal — it is rejected with `invalid_request` because a memory cannot have empty content (use `amp.forget` to delete a row).
+
+**No-op detection.** A well-formed request that produces no observable change (both `content` and `metadata` omitted, or a metadata merge that yields a byte-identical stored bag) returns `status: "no_change"` rather than `"updated"`. Callers can rely on this to short-circuit cache invalidation. Backends that cannot cheaply detect no-change MAY return `"updated"` instead — both are conformant.
+
+**Scope isolation.** Cross-scope updates are rejected as `not_found` (mirroring `amp.forget`), NOT as `invalid_request`. A scope-A caller passing a scope-B id MUST see the same response as if the id never existed — anything else would leak existence information across the partition boundary.
+
+* **Input:**
+  ```json
+  {
+    "scope": {
+      "agent_id": "string"
+    },
+    "id": "string",
+    "content": "string (optional)",
+    "metadata": {
+      "amp.confidence": 0.92,
+      "amp.categories": ["preference"],
+      "stale_key": null
+    },
+    "metadata_mode": "merge | replace"
+  }
+  ```
+
+* **Output:**
+  ```json
+  {
+    "status": "updated | no_change | not_found | not_supported",
+    "id": "string"
+  }
+  ```
+
 ---
 
 ### 3.3 Harness-Facing APIs (System-Only / Excluded from LLM Adapter)
@@ -431,6 +477,7 @@ Per MCP revision 2025-03-26, every tool declaration carries a `ToolAnnotations` 
 | `amp.stats`       | true  | false | true  | false | Pure read of backend counters. |
 | `amp.export`      | true  | false | true  | false | Read-only bulk dump (Harness-only). Idempotent: the same cursor against the same backend resumes at the same position. |
 | `amp.import`      | false | false | false | false | Mutates store. Not idempotent in the general case — `on_conflict=skip` makes a single MXF document round-trippable, but two distinct documents with overlapping content produce different end-states than the union would. |
+| `amp.update`      | false | false | true  | false | *v1.2-draft.* Mutates the content/metadata of a memory in place. Idempotent because applying the same patch twice produces the same end state. |
 
 **Harness-only verbs.** `amp.consolidate`, `amp.stats`, `amp.export`, and `amp.import` are Harness-tier system verbs and SHOULD NOT be projected through the MCP Adapter to the LLM unless the host explicitly grants bulk-read or admin access. The annotations above describe the verbs themselves, not the access policy.
 
