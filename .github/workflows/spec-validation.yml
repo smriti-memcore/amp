@@ -1,6 +1,6 @@
 name: Spec validation
 
-# Validate the AMP spec on every PR + push to main. Four independent jobs run
+# Validate the AMP spec on every PR + push to main. Three independent jobs run
 # in parallel so a failure in one (e.g. lockstep drift) doesn't block visibility
 # into others (e.g. compliance regressions).
 #
@@ -11,16 +11,25 @@ name: Spec validation
 #   2. schema-lockstep  — scripts/check_schema_lockstep.py. Compares the
 #                         JSON-Schema (MCP channel) against the OpenAPI (REST
 #                         channel) and fails on cross-channel drift.
-#   3. schemathesis     — schemathesis run against a prism mock generated from
-#                         the OpenAPI. Property-based testing catches schema
-#                         internal inconsistencies (response shapes, enums,
-#                         input-validation surface).
-#   4. compliance-suite — the existing hand-written 154-test pytest suite
+#   3. compliance-suite — the existing hand-written 154-test pytest suite
 #                         (compliance/test_amp_server.py) against the
 #                         reference server. Encodes behavioural MUSTs (RFC
 #                         7396 merge-patch, cross-scope not_found discipline,
 #                         transactional rollback, etc.) that no auto-generated
 #                         tooling can express.
+#
+# Schemathesis (property-based testing vs OpenAPI) was scoped in but pulled
+# back out before merge: with no real REST implementation to point it at, the
+# only target is `prism mock`, and prism injects its own non-spec-conformant
+# behaviour for every protocol-level edge case (TRACE→405 without Allow,
+# malformed-JSON→prism's own error envelope, application/x-ndjson without a
+# deserializer, etc.). Running schemathesis against prism turns into running
+# schemathesis against prism's interpretation of the spec, which is circular.
+# When AMP gains a real HTTP server (likely as part of the auth model work
+# tracked in #12, or a separate REST adapter PR), add a `schemathesis-vs-server`
+# job that points at the real server and exercises every check. The
+# scaffolding for that job lives in the PR #17 history if it's ever needed
+# again before then.
 #
 # Triggered on every PR to main and every push to main. Required statuses
 # (configured in branch protection) gate merges.
@@ -69,90 +78,6 @@ jobs:
 
       - name: Run lockstep checker
         run: python scripts/check_schema_lockstep.py
-
-  schemathesis:
-    name: Schemathesis property-based testing
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node (for prism)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Set up Python (for schemathesis)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install prism + schemathesis
-        run: |
-          npm install -g @stoplight/prism-cli
-          # Pin schemathesis 4.x explicitly so CLI option changes between
-          # major versions don't silently break this job. 4.4 introduced the
-          # `--url` flag (replacing `--base-url`) and reorganised the
-          # generation/budget controls under `--phases` / `--max-failures`.
-          pip install 'schemathesis>=4.4,<5'
-
-      - name: Start prism mock server
-        run: |
-          # --dynamic so prism generates spec-compliant random responses
-          # rather than echoing the first example. -p 4010 is the schemathesis
-          # default endpoint.
-          prism mock --dynamic --port 4010 schema/amp-openapi.yaml > prism.log 2>&1 &
-          # Wait for prism to come up; bail out after 30s. We check for the
-          # listening port rather than any specific endpoint because some
-          # AMP endpoints legitimately respond with 4xx to bare GETs.
-          for i in {1..30}; do
-            if curl -sf -o /dev/null -w "%{http_code}" http://localhost:4010/v1/memories/stats 2>&1 | grep -qE "^(200|400|404|422)$"; then
-              echo "prism ready after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-
-      - name: Run schemathesis against the mock
-        run: |
-          # Property-based fuzzer for OpenAPI. With prism as the target, this
-          # validates the OpenAPI document's INTERNAL CONSISTENCY (response
-          # schemas match what the spec says generated requests should produce)
-          # rather than checking a real implementation. That's the right test
-          # for "is the spec self-consistent". The implementation test lives in
-          # the compliance-suite job below.
-          #
-          # Exclusions, all narrow:
-          #
-          #   --exclude-checks unsupported_method
-          #     Requires the server to advertise an `Allow` header on 405
-          #     responses (RFC 9110). That's an HTTP middleware concern, not
-          #     an AMP spec concern — AMP doesn't define which verbs respond
-          #     to TRACE/etc. and the prism mock doesn't emit `Allow`. Pure
-          #     false positive against this stack.
-          #
-          #   --exclude-operation-id exportMemories
-          #     POST /v1/memories/export returns application/x-ndjson, which
-          #     schemathesis cannot validate without a custom
-          #     @schemathesis.deserializer(). The lockstep checker already
-          #     verifies ExportResponse's shape statically; we'll wire the
-          #     deserializer in a follow-up so streaming responses get
-          #     fuzzed too. Excluding only this one operation keeps the
-          #     other nine fully under property-based scrutiny.
-          #
-          # --max-failures 1: stop on first real failure so CI logs surface
-          # the actual problem rather than burying it under repeats.
-          # --phases coverage,fuzzing: skip the stateful phase (requires
-          # operation links we don't have yet) but keep both deterministic
-          # coverage and Hypothesis fuzzing.
-          schemathesis run \
-            --url http://localhost:4010 \
-            --checks all \
-            --exclude-checks unsupported_method \
-            --exclude-operation-id exportMemories \
-            --max-failures 1 \
-            --phases coverage,fuzzing \
-            schema/amp-openapi.yaml \
-          || (echo "::group::prism log"; cat prism.log; echo "::endgroup::"; exit 1)
 
   compliance-suite:
     name: AMP compliance suite (154 tests)
