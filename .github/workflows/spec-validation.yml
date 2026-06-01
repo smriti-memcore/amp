@@ -121,16 +121,34 @@ jobs:
           # for "is the spec self-consistent". The implementation test lives in
           # the compliance-suite job below.
           #
-          # -c all: every built-in check (status code conformance, response
-          # schema conformance, server errors, content type, headers, etc.).
+          # Exclusions, all narrow:
+          #
+          #   --exclude-checks unsupported_method
+          #     Requires the server to advertise an `Allow` header on 405
+          #     responses (RFC 9110). That's an HTTP middleware concern, not
+          #     an AMP spec concern — AMP doesn't define which verbs respond
+          #     to TRACE/etc. and the prism mock doesn't emit `Allow`. Pure
+          #     false positive against this stack.
+          #
+          #   --exclude-operation-id exportMemories
+          #     POST /v1/memories/export returns application/x-ndjson, which
+          #     schemathesis cannot validate without a custom
+          #     @schemathesis.deserializer(). The lockstep checker already
+          #     verifies ExportResponse's shape statically; we'll wire the
+          #     deserializer in a follow-up so streaming responses get
+          #     fuzzed too. Excluding only this one operation keeps the
+          #     other nine fully under property-based scrutiny.
+          #
           # --max-failures 1: stop on first real failure so CI logs surface
           # the actual problem rather than burying it under repeats.
-          # --phases coverage,fuzzing: skip the stateful phase (it requires
-          # link definitions in the OpenAPI that we don't have yet) but keep
-          # both deterministic coverage and Hypothesis fuzzing.
+          # --phases coverage,fuzzing: skip the stateful phase (requires
+          # operation links we don't have yet) but keep both deterministic
+          # coverage and Hypothesis fuzzing.
           schemathesis run \
             --url http://localhost:4010 \
             --checks all \
+            --exclude-checks unsupported_method \
+            --exclude-operation-id exportMemories \
             --max-failures 1 \
             --phases coverage,fuzzing \
             schema/amp-openapi.yaml \
