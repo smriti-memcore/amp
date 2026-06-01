@@ -1,0 +1,27 @@
+# Redocly CLI lint configuration for the AMP OpenAPI document.
+#
+# Defaults to the `recommended` ruleset, with two off-by-design relaxations:
+#
+# 1. security-defined — AMP v1.2-draft intentionally defers the auth model
+#    (tracked in issue #12); §3.6 / Appendix D have not yet landed. Until the
+#    spec PR for auth lands, every operation legitimately has no `security`
+#    block. Once auth ships, flip this rule back on.
+#
+# 2. no-server-example.com — the spec ships with `http://localhost:8000` as
+#    the dev server. That's deliberate documentation, not a production URL.
+#    The redocly recommended ruleset warns on localhost by default; in this
+#    repo it's a false positive.
+#
+# 3. info-license — AMP is licensed under the repo-level LICENSE (Apache 2.0
+#    per /LICENSE). Adding a license object to the OpenAPI document itself
+#    is fine to do later, but the recommended-ruleset warning is noisy in
+#    a CI gate. Downgraded from `warn` to off.
+#
+# All other recommended rules stay on.
+extends:
+  - recommended
+
+rules:
+  security-defined: off
+  no-server-example.com: off
+  info-license: off

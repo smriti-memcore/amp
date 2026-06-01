@@ -1,0 +1,106 @@
+name: Spec validation
+
+# Validate the AMP spec on every PR + push to main. Three independent jobs run
+# in parallel so a failure in one (e.g. lockstep drift) doesn't block visibility
+# into others (e.g. compliance regressions).
+#
+# Jobs:
+#   1. openapi-lint     — redocly lint on schema/amp-openapi.yaml. Catches
+#                         OpenAPI 3.0 structural bugs, broken $refs, missing
+#                         required fields, etc.
+#   2. schema-lockstep  — scripts/check_schema_lockstep.py. Compares the
+#                         JSON-Schema (MCP channel) against the OpenAPI (REST
+#                         channel) and fails on cross-channel drift.
+#   3. compliance-suite — the existing hand-written 154-test pytest suite
+#                         (compliance/test_amp_server.py) against the
+#                         reference server. Encodes behavioural MUSTs (RFC
+#                         7396 merge-patch, cross-scope not_found discipline,
+#                         transactional rollback, etc.) that no auto-generated
+#                         tooling can express.
+#
+# Schemathesis (property-based testing vs OpenAPI) was scoped in but pulled
+# back out before merge: with no real REST implementation to point it at, the
+# only target is `prism mock`, and prism injects its own non-spec-conformant
+# behaviour for every protocol-level edge case (TRACE→405 without Allow,
+# malformed-JSON→prism's own error envelope, application/x-ndjson without a
+# deserializer, etc.). Running schemathesis against prism turns into running
+# schemathesis against prism's interpretation of the spec, which is circular.
+# When AMP gains a real HTTP server (likely as part of the auth model work
+# tracked in #12, or a separate REST adapter PR), add a `schemathesis-vs-server`
+# job that points at the real server and exercises every check. The
+# scaffolding for that job lives in the PR #17 history if it's ever needed
+# again before then.
+#
+# Triggered on every PR to main and every push to main. Required statuses
+# (configured in branch protection) gate merges.
+
+"on":
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openapi-lint:
+    name: OpenAPI 3.0 lint (redocly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install redocly
+        run: npm install -g @redocly/cli@latest
+
+      - name: Lint schema/amp-openapi.yaml
+        run: redocly lint schema/amp-openapi.yaml
+
+  schema-lockstep:
+    name: Schema lockstep (amp.json ↔ amp-openapi.yaml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Run lockstep checker
+        run: python scripts/check_schema_lockstep.py
+
+  compliance-suite:
+    name: AMP compliance suite (154 tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install reference server (editable)
+        working-directory: python/amp-server
+        run: |
+          pip install -e .
+          pip install pytest
+
+      - name: Run compliance suite
+        run: |
+          # The suite is parameterised on the server command — it spawns one
+          # subprocess per test fixture and speaks MCP/stdio. Reference server
+          # is amp-server (from the editable install above).
+          pytest compliance/test_amp_server.py \
+            --server-cmd "$(which amp-server)" \
+            -q --tb=short
