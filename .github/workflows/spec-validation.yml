@@ -89,18 +89,23 @@ jobs:
       - name: Install prism + schemathesis
         run: |
           npm install -g @stoplight/prism-cli
-          pip install 'schemathesis>=3.36'
+          # Pin schemathesis 4.x explicitly so CLI option changes between
+          # major versions don't silently break this job. 4.4 introduced the
+          # `--url` flag (replacing `--base-url`) and reorganised the
+          # generation/budget controls under `--phases` / `--max-failures`.
+          pip install 'schemathesis>=4.4,<5'
 
       - name: Start prism mock server
         run: |
-          # Use --dynamic so prism generates spec-compliant random responses
+          # --dynamic so prism generates spec-compliant random responses
           # rather than echoing the first example. -p 4010 is the schemathesis
           # default endpoint.
           prism mock --dynamic --port 4010 schema/amp-openapi.yaml > prism.log 2>&1 &
-          # Wait for prism to come up; bail out after 30s.
+          # Wait for prism to come up; bail out after 30s. We check for the
+          # listening port rather than any specific endpoint because some
+          # AMP endpoints legitimately respond with 4xx to bare GETs.
           for i in {1..30}; do
-            if curl -sf http://localhost:4010 > /dev/null 2>&1 || \
-               curl -sf -X POST http://localhost:4010/v1/memories/stats?agent_id=a 2>&1 | grep -q .; then
+            if curl -sf -o /dev/null -w "%{http_code}" http://localhost:4010/v1/memories/stats 2>&1 | grep -qE "^(200|400|404|422)$"; then
               echo "prism ready after ${i}s"
               break
             fi
@@ -116,15 +121,18 @@ jobs:
           # for "is the spec self-consistent". The implementation test lives in
           # the compliance-suite job below.
           #
-          # --checks: all built-in checks (status code conformance, response
-          # schema conformance, server errors, content type, headers).
-          # --max-examples: per-endpoint hypothesis budget; 25 is enough to
-          # catch structural bugs without ballooning CI time.
+          # -c all: every built-in check (status code conformance, response
+          # schema conformance, server errors, content type, headers, etc.).
+          # --max-failures 1: stop on first real failure so CI logs surface
+          # the actual problem rather than burying it under repeats.
+          # --phases coverage,fuzzing: skip the stateful phase (it requires
+          # link definitions in the OpenAPI that we don't have yet) but keep
+          # both deterministic coverage and Hypothesis fuzzing.
           schemathesis run \
-            --base-url http://localhost:4010 \
+            --url http://localhost:4010 \
             --checks all \
-            --max-examples 25 \
-            --hypothesis-deadline 5000 \
+            --max-failures 1 \
+            --phases coverage,fuzzing \
             schema/amp-openapi.yaml \
           || (echo "::group::prism log"; cat prism.log; echo "::endgroup::"; exit 1)
 
