@@ -1,10 +1,15 @@
 openapi: 3.0.0
 info:
-  title: Agent Memory Protocol (AMP) v1.1 REST API Specification
+  title: Agent Memory Protocol (AMP) v1.2-draft REST API Specification
   description: |
-    Standard RESTful service contract for the Agent Memory Protocol (AMP) v1.1.
-    This specification enables application harnesses to integrate with memory backends
-    as a robust service layer, independent of the Model Context Protocol (MCP) transport.
+    Standard RESTful service contract for the Agent Memory Protocol (AMP).
+    Tracks spec/amp-v1.1.md, which is currently at **v1.2-draft** (extends v1.1
+    with `amp.update`, `amp.batch_encode`, structured `metadata_filters`, and
+    the recall-hardening / metadata-bag-cap rules).
+
+    This specification enables application harnesses to integrate with memory
+    backends as a robust service layer, independent of the Model Context
+    Protocol (MCP) transport.
 
     Error model: every non-2xx response body conforms to `ErrorResponse`
     (`amp_error_code` + `message`). Per spec §3.5, the field name and enum match
@@ -17,7 +22,14 @@ info:
     | not_found        | 404         |
     | not_supported    | 501         |
     | backend_error    | 500         |
-  version: 1.1.0
+
+    **Existence-leak discipline.** `amp.forget`, `amp.pin`, and `amp.update`
+    return their `not_found` outcome as a **200 response with `status:
+    "not_found"`** rather than HTTP 404. This is deliberate: it matches the
+    MCP channel byte-for-byte (JSON-RPC has no HTTP status), and it prevents
+    cross-scope existence leaks. A scope-A caller passing a scope-B id MUST
+    see the same response shape as if the id never existed in any scope.
+  version: 1.2.0-draft
 servers:
   - url: http://localhost:8000
     description: Local development memory backend server
@@ -121,31 +133,177 @@ paths:
               $ref: '#/components/schemas/ScopeEnvelope'
       responses:
         '200':
-          description: Deletion request outcome
+          description: |
+            Deletion request outcome. **`not_found` is returned here, not via
+            HTTP 404**, to match the MCP channel and to avoid leaking
+            cross-scope existence information (a scope-A caller passing a
+            scope-B id sees the same 200 + `{status: "not_found"}` as if the
+            id never existed).
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  - status
-                properties:
-                  status:
-                    type: string
-                    enum: [forgotten]
+                $ref: '#/components/schemas/ForgetResponse'
         '400':
           description: Invalid scope (e.g. missing isolating identity key)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Memory not found under the active scope
+        '500':
+          description: Internal backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      summary: Update a memory in place (amp.update) — v1.2-draft
+      description: |
+        Mutate the `content` and/or `metadata` of an existing memory without
+        changing its `id`, `scope`, `source`, `status`, or `creation_time`.
+        Closes the v1.1 gap where a fact correction or confidence-recomputation
+        forced callers to `forget` + `encode` and lose the original `id` and
+        any graph edges that referenced it.
+
+        **Metadata semantics.** By default `metadata` applies as RFC 7396 JSON
+        Merge Patch — keys present in the request are written, keys absent are
+        preserved, and `null` in the patch removes the corresponding key. Set
+        `metadata_mode: "replace"` to overwrite the bag wholesale.
+
+        **No-op detection.** A request that produces no observable change
+        (both `content` and `metadata` omitted, or a merge that yields a
+        byte-identical bag) returns `status: "no_change"` rather than
+        `"updated"`.
+
+        **Cross-scope id → 200 `not_found`** (existence-leak discipline). See
+        the response 200 description.
+
+        **Transactional durability.** If the durable write fails after the
+        in-memory mutation, the response is `backend_error` AND the in-memory
+        state is rolled back to the pre-update snapshot.
+
+        See spec §3.2.4. Introduced in v1.2-draft. v1.1 backends MAY respond
+        501 (`not_supported`).
+      operationId: updateMemory
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Globally unique identifier of the memory to update.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRequest'
+      responses:
+        '200':
+          description: |
+            Update outcome. `not_found` is returned here (not via HTTP 404) to
+            match the MCP channel and to avoid cross-scope existence leaks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateResponse'
+        '400':
+          description: |
+            Invalid request (missing isolating identity key, empty `content`
+            explicitly supplied, invalid `metadata_mode`, oversized metadata
+            bag).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
-          description: Internal backend error
+          description: |
+            Internal backend error. If the durable write failed after the
+            in-memory mutation, the backend MUST have rolled back the mutation
+            before returning this status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: |
+            Backend does not implement amp.update. v1.1-conformant backends
+            MAY return this status for the entire endpoint.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/memories/batch_encode:
+    post:
+      summary: Encode multiple memories in one round-trip (amp.batch_encode) — v1.2-draft
+      description: |
+        Store multiple memories in a single network round-trip under one shared
+        top-level `scope`. Entries do NOT carry their own scope — all rows in a
+        single call land under the request `scope`. Callers needing multi-scope
+        bulk writes issue one `batch_encode` call per scope (or fall back to
+        `amp.import` for true cross-scope migration).
+
+        **Per-row strictness.** Backends MUST treat the following as row-level
+        `invalid_request` (so the surrounding batch keeps going):
+        - Unknown / forbidden keys on an entry (anything outside `content`,
+          `source`, `force`, `metadata`). Notably `scope`, `agent_id`, and the
+          deprecated `private` field MUST NOT be silently dropped.
+        - `force` not strictly a JSON boolean.
+        - `source` present but not in the published `MemorySource` enum.
+        - `metadata` exceeding the 64 KiB serialized JSON cap.
+
+        **Ordering.** `results[]` MUST appear in the same order as the input
+        `entries[]`, with `len(results) == len(entries)`.
+
+        **Durable-save honesty.** If a backend defers durable writes and the
+        end-of-batch save fails, every row whose durability depended on it
+        MUST be downgraded from `stored` to `backend_error` in `results[]`
+        AND the `summary` counters MUST reflect the downgrade.
+
+        **Size limit.** The schema caps `entries.maxItems` at 1000. Backends
+        MAY enforce a lower cap and MUST reject over-limit requests with
+        `invalid_request`.
+
+        See spec §3.2.5. Introduced in v1.2-draft. v1.1 backends MAY respond
+        501 (`not_supported`).
+      operationId: batchEncodeMemories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchEncodeRequest'
+      responses:
+        '200':
+          description: |
+            Batch processed (synchronously or accepted for async processing).
+            Row-level failures live in `results[i].status` and do NOT cause
+            the request itself to fail with HTTP 400 — only request-level
+            problems do.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchEncodeResponse'
+        '400':
+          description: |
+            Request-level error: missing/invalid `scope`, `entries` not an
+            array, batch over the backend's `maxItems` cap. Per-row failures
+            are NOT returned at this status — they are reported in
+            `BatchEncodeResponse.results[i]`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal backend error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: |
+            Backend does not implement amp.batch_encode. v1.1-conformant
+            backends MAY return this status.
           content:
             application/json:
               schema:
@@ -173,25 +331,18 @@ paths:
               $ref: '#/components/schemas/ScopeEnvelope'
       responses:
         '200':
-          description: Pin request outcome
+          description: |
+            Pin request outcome. `not_found` is returned here (not via HTTP
+            404) to match the MCP channel and avoid cross-scope existence
+            leaks. `not_supported` is also returned as a 200 body status when
+            the backend simply doesn't implement pinning; legacy backends MAY
+            still respond 501 instead.
           content:
             application/json:
               schema:
-                type: object
-                required:
-                  - status
-                properties:
-                  status:
-                    type: string
-                    enum: [pinned]
+                $ref: '#/components/schemas/PinResponse'
         '400':
           description: Invalid scope (e.g. missing isolating identity key)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Memory not found under the active scope
           content:
             application/json:
               schema:
@@ -351,8 +502,7 @@ paths:
           content:
             application/x-ndjson:
               schema:
-                type: string
-                description: NDJSON (MXF). Each line is a `MemoryResult` JSON object.
+                $ref: '#/components/schemas/ExportResponse'
         '400':
           description: Invalid scope or filters
           content:
@@ -636,6 +786,61 @@ components:
         timestamp_before:
           type: string
           format: date-time
+        metadata_filters:
+          type: array
+          maxItems: 32
+          description: |
+            v1.2-draft. Structured predicates over the memory's metadata bag.
+            All entries combined with strict AND — a memory MUST satisfy every
+            filter to be returned. Backends MUST treat missing keys and
+            mismatched value types as a filter miss (not a server error).
+            See spec §3.2.2.1.
+          items:
+            $ref: '#/components/schemas/MetadataFilter'
+
+    MetadataFilter:
+      type: object
+      description: |
+        v1.2-draft. A single key-operator-value predicate over a memory's
+        metadata bag. Used inside `RecallFilters.metadata_filters[]`. Keys are
+        FLAT lookups against the stored metadata object — dotted strings like
+        `amp.confidence` are literal keys, not path expressions.
+      required: [key, operator, value]
+      additionalProperties: false
+      properties:
+        key:
+          type: string
+          description: |
+            Metadata key to evaluate. Reserved AMP keys like `amp.confidence`
+            or `amp.categories` are addressable directly.
+        operator:
+          type: string
+          enum: [eq, ne, gt, gte, lt, lte, in, contains]
+          description: |
+            Comparison operator. Per-operator value type: eq/ne/gt/gte/lt/lte
+            expect a scalar (string|number|boolean). `in` expects an array;
+            the row matches when the stored value equals any element.
+            `contains` expects a scalar; the row matches when the stored
+            value (array OR string) contains that scalar. Any other operator
+            string MUST be returned as `invalid_request`.
+        value:
+          description: |
+            Comparison value. Scalar (string|number|boolean) for
+            eq/ne/gt/gte/lt/lte/contains; array of scalars for `in`. `null`,
+            nested arrays, and nested objects are rejected with
+            `invalid_request`. JSON Schema cannot fully express the
+            operator-dependent shape; backends MUST enforce the per-operator
+            shape (see spec §3.2.2.1 "Error surface").
+          anyOf:
+            - type: string
+            - type: number
+            - type: boolean
+            - type: array
+              items:
+                anyOf:
+                  - type: string
+                  - type: number
+                  - type: boolean
 
     RecallResponse:
       type: object
@@ -814,3 +1019,254 @@ components:
         event_id:
           type: string
           description: Optional async processing reference if the backend executes the import asynchronously.
+
+    ForgetResponse:
+      type: object
+      description: |
+        Response shape for DELETE /v1/memories/{id} (amp.forget). `not_found`
+        is returned here, not via HTTP 404, to match the MCP channel and to
+        avoid cross-scope existence leaks (spec §3.2.3, §5.4).
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [forgotten, not_found]
+          description: |
+            `forgotten` — the memory existed under the active scope and was
+            deleted. `not_found` — no memory with that `id` exists under the
+            active scope (this is what a cross-scope id returns too; the
+            backend MUST NOT distinguish "wrong scope" from "doesn't exist").
+
+    PinResponse:
+      type: object
+      description: |
+        Response shape for PUT /v1/memories/{id}/pin (amp.pin). `not_found`
+        and `not_supported` are returned here as success body statuses to
+        match the MCP channel; legacy backends MAY still respond with HTTP
+        404 / 501 instead.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum: [pinned, not_found, not_supported]
+          description: |
+            `pinned` — memory is marked permanent. `not_found` — no memory
+            with that `id` under the active scope (existence-leak
+            discipline). `not_supported` — backend does not implement
+            pinning.
+
+    UpdateRequest:
+      type: object
+      description: |
+        v1.2-draft. Body for PATCH /v1/memories/{id} (amp.update). At least
+        one isolating identity key must be supplied via `scope` (preferred) or
+        legacy `agent_id`. Omit `content` and `metadata` to make a no-op call
+        (returns `status: "no_change"`); supply one or both to mutate. See
+        spec §3.2.4.
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
+      properties:
+        scope:
+          $ref: '#/components/schemas/Scope'
+        agent_id:
+          type: string
+          description: Legacy v1.0 flat identifier (mapped to scope.agent_id).
+        content:
+          type: string
+          minLength: 1
+          description: |
+            New content for the memory. Omit to leave unchanged. An empty
+            string is rejected with `invalid_request` (use `amp.forget` to
+            delete a row).
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Patch applied to the existing metadata bag. Default semantics are
+            RFC 7396 JSON Merge Patch (keys absent from the patch are
+            preserved; `null` in the patch removes the key). Set
+            `metadata_mode: "replace"` to overwrite the bag wholesale. The
+            post-merge bag is bounded by the 64 KiB serialized JSON cap; a
+            request that would land an oversized bag is rejected as
+            `invalid_request` BEFORE the durable write.
+        metadata_mode:
+          type: string
+          enum: [merge, replace]
+          default: merge
+          description: |
+            `merge` (default, RFC 7396) — patch into the existing metadata
+            bag. `replace` — overwrite the bag wholesale with the request's
+            `metadata` value. Backends MUST NOT default to `replace`.
+
+    UpdateResponse:
+      type: object
+      description: |
+        v1.2-draft. Response shape for PATCH /v1/memories/{id} (amp.update).
+        `id` is echoed so pipelined callers can correlate by index.
+      required:
+        - status
+      properties:
+        id:
+          type: string
+          description: |
+            The memory id that was updated. Echoes the path parameter on
+            success (`updated`/`no_change`) and is omitted on `not_found` /
+            `not_supported`.
+        status:
+          type: string
+          enum: [updated, no_change, not_found, not_supported]
+          description: |
+            `updated` — the memory was mutated. `no_change` — the request was
+            well-formed but produced no observable change. `not_found` — no
+            memory with that `id` exists under the active scope
+            (existence-leak discipline; matches `amp.forget`). `not_supported`
+            — backend does not implement mutation.
+
+    BatchEncodeRequest:
+      type: object
+      description: |
+        v1.2-draft. Body for POST /v1/memories/batch_encode. Shared `scope`
+        applies to every row; entries do NOT carry their own scope. See spec
+        §3.2.5.
+      anyOf:
+        - required: [scope]
+        - required: [agent_id]
+      required:
+        - entries
+      properties:
+        scope:
+          $ref: '#/components/schemas/Scope'
+        agent_id:
+          type: string
+          description: Legacy v1.0 flat identifier (mapped to scope.agent_id).
+        entries:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: |
+            Per-row encode entries. Each row is the same shape as `amp.encode`
+            input minus the scope keys. Backends MAY enforce a lower
+            `maxItems` cap; over-limit requests are rejected with
+            `invalid_request`.
+          items:
+            $ref: '#/components/schemas/BatchEncodeEntry'
+
+    BatchEncodeEntry:
+      type: object
+      description: |
+        v1.2-draft. A single row in `BatchEncodeRequest.entries[]`. Forbidden
+        keys (`scope`, `agent_id`, `private`) are explicitly rejected with
+        row-level `invalid_request` rather than silently dropped, so clients
+        can't think the value was honoured.
+      additionalProperties: false
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          minLength: 1
+          description: Memory content. Empty/whitespace strings are row-level invalid_request.
+        source:
+          type: string
+          description: |
+            Provenance label. Must match a member of the published
+            `MemorySource` enum; an unrecognised string is row-level
+            `invalid_request` (no silent fall-back).
+        force:
+          type: boolean
+          default: false
+          description: |
+            Bypass the salience gate. Strict bool only — truthy coercion
+            (`"true"`, `1`, `[]`) is row-level `invalid_request`.
+        metadata:
+          type: object
+          additionalProperties: true
+          description: |
+            Optional metadata bag for this row. 64 KiB serialized JSON cap
+            applies per-row; oversized bags are row-level `invalid_request`.
+
+    BatchEncodeRowResult:
+      type: object
+      description: |
+        v1.2-draft. A single row in `BatchEncodeResponse.results[]`.
+        Ordering invariant: `results[i]` corresponds to `entries[i]` for every
+        `i`.
+      required:
+        - status
+      properties:
+        id:
+          type: string
+          description: Memory id allocated for this row. Present when status is `stored` or `duplicate`.
+        status:
+          type: string
+          enum: [stored, duplicate, below_threshold, queued, invalid_request, backend_error]
+          description: |
+            Per-row outcome. `stored` — new id allocated. `duplicate` —
+            content already present under the scope. `below_threshold` —
+            salience gate rejected the row. `queued` — async ingestion
+            accepted; `id` may be deferred. `invalid_request` — row was
+            malformed. `backend_error` — backend failed to write THIS row
+            (other rows are unaffected). The latter two MUST also carry
+            `message`.
+        message:
+          type: string
+          description: Diagnostic. Required on `invalid_request` / `backend_error`.
+
+    BatchSummary:
+      type: object
+      description: |
+        v1.2-draft. Aggregated counts across the batch. Backends MUST emit
+        `summary` whenever `results[]` has at least one row.
+      required:
+        - stored
+        - below_threshold
+        - duplicate
+        - failed
+      properties:
+        stored:
+          type: integer
+          minimum: 0
+        below_threshold:
+          type: integer
+          minimum: 0
+        duplicate:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+
+    BatchEncodeResponse:
+      type: object
+      description: |
+        v1.2-draft. Response shape for POST /v1/memories/batch_encode.
+      required:
+        - results
+        - summary
+      properties:
+        results:
+          type: array
+          description: |
+            One outcome per input row, in the same order as the input
+            `entries[]`. `len(results) == len(entries)`.
+          items:
+            $ref: '#/components/schemas/BatchEncodeRowResult'
+        summary:
+          $ref: '#/components/schemas/BatchSummary'
+
+    ExportResponse:
+      description: |
+        Body shape of the NDJSON stream emitted by POST /v1/memories/export.
+        Each line is a JSON-encoded `MemoryResult` object. The
+        `application/x-ndjson` content type is the wire-level container — the
+        schema below documents the per-line payload only.
+
+        Continuation across pages travels in the `X-AMP-Next-Cursor` response
+        header (see the endpoint's 200 response). The body itself does not
+        carry a cursor envelope.
+      type: array
+      items:
+        $ref: '#/components/schemas/MemoryResult'
