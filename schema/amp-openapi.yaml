@@ -509,12 +509,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Scope partition does not exist
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
         '501':
           description: Backend does not support bulk export
           content:
@@ -1025,7 +1019,7 @@ components:
       description: |
         Response shape for DELETE /v1/memories/{id} (amp.forget). `not_found`
         is returned here, not via HTTP 404, to match the MCP channel and to
-        avoid cross-scope existence leaks (spec §3.2.3, §5.4).
+        avoid cross-scope existence leaks (spec §3.2.3).
       required:
         - status
       properties:
@@ -1043,8 +1037,10 @@ components:
       description: |
         Response shape for PUT /v1/memories/{id}/pin (amp.pin). `not_found`
         and `not_supported` are returned here as success body statuses to
-        match the MCP channel; legacy backends MAY still respond with HTTP
-        404 / 501 instead.
+        match the MCP channel. The path's `501` response remains available
+        for backends that prefer the HTTP-status route for `not_supported`,
+        but `not_found` MUST come back as 200 + body status (existence-leak
+        discipline).
       required:
         - status
       properties:
@@ -1065,6 +1061,7 @@ components:
         legacy `agent_id`. Omit `content` and `metadata` to make a no-op call
         (returns `status: "no_change"`); supply one or both to mutate. See
         spec §3.2.4.
+      additionalProperties: false
       anyOf:
         - required: [scope]
         - required: [agent_id]
@@ -1131,6 +1128,7 @@ components:
         v1.2-draft. Body for POST /v1/memories/batch_encode. Shared `scope`
         applies to every row; entries do NOT carry their own scope. See spec
         §3.2.5.
+      additionalProperties: false
       anyOf:
         - required: [scope]
         - required: [agent_id]
@@ -1144,13 +1142,14 @@ components:
           description: Legacy v1.0 flat identifier (mapped to scope.agent_id).
         entries:
           type: array
-          minItems: 1
+          minItems: 0
           maxItems: 1000
           description: |
             Per-row encode entries. Each row is the same shape as `amp.encode`
-            input minus the scope keys. Backends MAY enforce a lower
-            `maxItems` cap; over-limit requests are rejected with
-            `invalid_request`.
+            input minus the scope keys. An empty array is well-formed and
+            yields an empty `results[]` (`minItems: 0` matches the canonical
+            schema). Backends MAY enforce a lower `maxItems` cap; over-limit
+            requests are rejected with `invalid_request`.
           items:
             $ref: '#/components/schemas/BatchEncodeEntry'
 
@@ -1242,10 +1241,13 @@ components:
     BatchEncodeResponse:
       type: object
       description: |
-        v1.2-draft. Response shape for POST /v1/memories/batch_encode.
+        v1.2-draft. Response shape for POST /v1/memories/batch_encode. The
+        canonical JSON-Schema requires only `results`; `summary` is emitted
+        by backends whenever `results[]` has at least one row (per spec
+        §3.2.5 "Summary block") but is not part of the strict required-set so
+        a backend returning an empty batch may legitimately omit it.
       required:
         - results
-        - summary
       properties:
         results:
           type: array
@@ -1260,13 +1262,14 @@ components:
     ExportResponse:
       description: |
         Body shape of the NDJSON stream emitted by POST /v1/memories/export.
-        Each line is a JSON-encoded `MemoryResult` object. The
-        `application/x-ndjson` content type is the wire-level container — the
-        schema below documents the per-line payload only.
+        NDJSON (`application/x-ndjson`) is line-delimited JSON, NOT a single
+        JSON array: each line is an independently parseable JSON object
+        conforming to `MemoryResult`. Modelled as `type: string` because the
+        OpenAPI body schema describes the byte stream — readers MUST split
+        on `\n` and parse each non-empty line as a `MemoryResult`. See spec
+        Appendix A for the MXF row schema and consumer guidance.
 
         Continuation across pages travels in the `X-AMP-Next-Cursor` response
         header (see the endpoint's 200 response). The body itself does not
         carry a cursor envelope.
-      type: array
-      items:
-        $ref: '#/components/schemas/MemoryResult'
+      type: string
