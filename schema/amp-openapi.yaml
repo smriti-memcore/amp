@@ -587,6 +587,7 @@ components:
         MUST be set. The remaining keys (`session_id`, `app_id`, `org_id`)
         refine the namespace but do NOT satisfy the at-least-one-isolating-key
         requirement on their own.
+      additionalProperties: false
       minProperties: 1
       properties:
         agent_id:
@@ -691,6 +692,7 @@ components:
 
     EncodeRequest:
       type: object
+      additionalProperties: false
       required:
         - content
       anyOf:
@@ -741,6 +743,7 @@ components:
 
     RecallRequest:
       type: object
+      additionalProperties: false
       required:
         - query
       anyOf:
@@ -848,6 +851,7 @@ components:
 
     ConsolidateRequest:
       type: object
+      additionalProperties: false
       anyOf:
         - required: [scope]
         - required: [agent_id]
@@ -905,6 +909,7 @@ components:
     ExportRequest:
       type: object
       description: Bulk export request. Scope and (optional) filters define which rows are emitted. Use `page_size` and `cursor` for pagination.
+      additionalProperties: false
       anyOf:
         - required: [scope]
         - required: [agent_id]
@@ -938,6 +943,7 @@ components:
         without an adapter. `ndjson` carries the inline MemoryResult lines; the
         structured `scope` and the `on_conflict` / `scope_remap` policy fields
         govern how the import is applied.
+      additionalProperties: false
       required: [ndjson]
       anyOf:
         - required: [scope]
