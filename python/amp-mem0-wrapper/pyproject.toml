@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amp-mem0-wrapper"
+version = "1.0.0"
+description = "AMP (Agent Memory Protocol) wrapper for Mem0"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "mcp>=1.0",
+    "mem0ai>=0.1.0",
+]
+
+[project.scripts]
+amp-mem0-wrapper = "amp_mem0_wrapper.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/amp_mem0_wrapper"]
