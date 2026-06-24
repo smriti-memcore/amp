@@ -131,6 +131,12 @@ def _normalize_scope(
                 "invalid_request",
                 f"scope contains unknown keys: {sorted(unknown)}",
             )
+        for k, v in scope.items():
+            if isinstance(v, (dict, list)):
+                raise AmpToolError(
+                    "invalid_request",
+                    f"scope key '{k}' contains nested structure which is not allowed",
+                )
         normalized = {k: v for k, v in scope.items() if v is not None and v != ""}
         if agent_id:
             existing = normalized.get("agent_id")
@@ -728,7 +734,7 @@ def amp_recall(
     ),
 )
 def amp_forget(
-    memory_id: str,
+    id: str,
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -739,7 +745,7 @@ def amp_forget(
 
     # Enforce existence and scope-isolation check before deleting
     try:
-        item = client.get(memory_id)
+        item = client.get(id)
         if not item:
             return {"status": "not_found"}
         # If user_id (our scope_key) does not match, treat as not_found
@@ -750,7 +756,7 @@ def amp_forget(
         return {"status": "not_found"}
 
     try:
-        client.delete(memory_id)
+        client.delete(id)
         return {"status": "forgotten"}
     except Exception as exc:
         raise AmpToolError("backend_error", f"Mem0 delete failed: {exc}")
@@ -811,7 +817,7 @@ def amp_stats(
     ),
 )
 def amp_update(
-    memory_id: str,
+    id: str,
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
     content: Optional[str] = None,
@@ -828,7 +834,7 @@ def amp_update(
 
     # Verify existence and scope isolation
     try:
-        item = client.get(memory_id)
+        item = client.get(id)
         if not item:
             return {"status": "not_found"}
         stored_user_id = item.get("user_id") or item.get("metadata", {}).get("user_id")
@@ -868,7 +874,7 @@ def amp_update(
 
     # Check for no-op
     if new_content == existing_content and new_user_metadata == existing_metadata:
-        return {"status": "no_change", "id": memory_id}
+        return {"status": "no_change", "id": id}
 
     # Construct the actual payload for Mem0
     meta_for_update = {}
@@ -880,13 +886,13 @@ def amp_update(
     # Call Mem0 update (try `data=` first; fall back to `text=` for older Mem0 versions)
     try:
         try:
-            client.update(memory_id, data=new_content, metadata=meta_for_update)
+            client.update(id, data=new_content, metadata=meta_for_update)
         except TypeError:
-            client.update(memory_id, text=new_content, metadata=meta_for_update)
+            client.update(id, text=new_content, metadata=meta_for_update)
     except Exception as exc:
         raise AmpToolError("backend_error", f"Mem0 update failed: {exc}")
 
-    return {"status": "updated", "id": memory_id}
+    return {"status": "updated", "id": id}
 
 
 # ── amp.batch_encode ──────────────────────────────────────────────────────────
@@ -1012,7 +1018,7 @@ def amp_batch_encode(
     ),
 )
 def amp_pin(
-    memory_id: str,
+    id: str,
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:

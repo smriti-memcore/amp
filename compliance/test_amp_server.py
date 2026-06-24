@@ -2440,3 +2440,135 @@ class TestUpdateMetadataBagAcceptedUnderCap:
             "metadata": ok_bag,
         })
         assert upd["status"] in ("updated", "no_change"), upd
+
+
+class TestScopeTypeValidation:
+    """Validate that scope values must be flat primitives (strings, numbers, booleans)
+    and that nested arrays or dictionaries are rejected.
+    """
+
+    def test_encode_with_nested_dict_in_scope_rejected(self, client):
+        scope = {
+            "agent_id": "test-nested-dict-agent",
+            "nested_field": {"key": "value"}
+        }
+        resp = client.call_tool("amp.encode", {
+            "scope": scope,
+            "content": "some content",
+            "force": True,
+        })
+        assert "error" in resp, f"Expected error but got: {resp}"
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+    def test_encode_with_nested_list_in_scope_rejected(self, client):
+        scope = {
+            "agent_id": "test-nested-list-agent",
+            "nested_field": ["value1", "value2"]
+        }
+        resp = client.call_tool("amp.encode", {
+            "scope": scope,
+            "content": "some content",
+            "force": True,
+        })
+        assert "error" in resp, f"Expected error but got: {resp}"
+        data = resp["error"].get("data") or {}
+        assert data.get("amp_error_code") == "invalid_request"
+
+
+class TestUnicodeContentFidelity:
+    """Validate content fidelity for non-Latin scripts, emojis, and complex Unicode characters."""
+
+    def test_unicode_round_trip(self, client, agent_id):
+        unicode_content = "Hello, 🗺️ 世界! Καλημέρα κόσμε! Привет, мир! 🚀 Unicode fidelity test."
+        enc = client.call_tool("amp.encode", {
+            "agent_id": agent_id,
+            "content": unicode_content,
+            "force": True,
+            "metadata": {"script": "multilingual_🌟"},
+        })
+        assert "error" not in enc, enc
+        assert enc.get("status") == "stored"
+        memory_id = enc["id"]
+
+        rec = client.call_tool("amp.recall", {
+            "agent_id": agent_id,
+            "query": "Καλημέρα κόσμε",
+        })
+        assert "error" not in rec, rec
+        matched = [m for m in rec.get("results", []) if m.get("id") == memory_id]
+        assert matched, "Unicode memory should be recallable"
+        assert matched[0].get("content") == unicode_content, "Unicode content should be preserved exactly"
+        assert matched[0].get("metadata", {}).get("script") == "multilingual_🌟", "Unicode metadata should be preserved exactly"
+
+    def test_unicode_round_trip_with_scope(self, client):
+        scope = {
+            "agent_id": "unicode-agent-🌍",
+            "workspace_id": "space-🚀"
+        }
+        unicode_content = "Hieroglyphs: 𓀀 𓀁 2 𓀃. Cuneiform: 𒀀 𒀁 𒀂."
+        enc = client.call_tool("amp.encode", {
+            "scope": scope,
+            "content": unicode_content,
+            "force": True,
+        })
+        assert "error" not in enc, enc
+        assert enc.get("status") == "stored"
+        memory_id = enc["id"]
+
+        rec = client.call_tool("amp.recall", {
+            "scope": scope,
+            "query": "Hieroglyphs",
+        })
+        assert "error" not in rec, rec
+        matched = [m for m in rec.get("results", []) if m.get("id") == memory_id]
+        assert matched, "Unicode memory under scope should be recallable"
+        assert matched[0].get("content") == unicode_content, "Unicode content should be preserved exactly under scope"
+
+
+class TestConcurrentExecution:
+    """Validate that the server can handle concurrent requests correctly
+    using separate client connections.
+    """
+
+    def test_concurrent_encodes(self, server_cmd):
+        from concurrent.futures import ThreadPoolExecutor
+        num_threads = 5
+        agent_ids = [f"concurrent-agent-{i}-{uuid.uuid4().hex[:4]}" for i in range(num_threads)]
+        contents = [f"concurrent content message index {i}" for i in range(num_threads)]
+
+        def run_client_task(args):
+            agent_id, content = args
+            client = MCPClient(server_cmd)
+            try:
+                resp = client.call_tool("amp.encode", {
+                    "agent_id": agent_id,
+                    "content": content,
+                    "force": True,
+                })
+                assert "error" not in resp, f"Concurrent encode failed: {resp}"
+                assert resp.get("status") == "stored", resp
+                memory_id = resp["id"]
+
+                # Recall with retries to handle any concurrent indexing/commit lags
+                found = False
+                for attempt in range(5):
+                    rec = client.call_tool("amp.recall", {
+                        "agent_id": agent_id,
+                        "query": content,
+                    })
+                    assert "error" not in rec, rec
+                    if any(m.get("id") == memory_id for m in rec.get("results", [])):
+                        found = True
+                        break
+                    time.sleep(0.2)
+                assert found, "Recall failed to find concurrently encoded memory after retries"
+                return True
+            finally:
+                client.close()
+
+        tasks = list(zip(agent_ids, contents))
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            results = list(executor.map(run_client_task, tasks))
+
+        assert all(results), "Not all concurrent client tasks succeeded"
