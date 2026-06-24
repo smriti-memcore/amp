@@ -63,6 +63,21 @@ amp-server --storage-path ~/.amp
 
 See [python/amp-server/README.md](python/amp-server/README.md) for Claude Desktop / Claude Code wiring and the current conformance-level breakdown of the reference impl.
 
+### Run the Mem0 wrapper (Core-conformant, MCP stdio)
+
+If you use Mem0 as your memory backend, you can run the AMP wrapper to expose it:
+
+```bash
+# One-shot run with uvx:
+uvx --from "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-mem0-wrapper" amp-mem0-wrapper --storage-path ~/.amp/mem0
+
+# Or install into a venv:
+pip install "git+https://github.com/smriti-memcore/amp.git#subdirectory=python/amp-mem0-wrapper"
+amp-mem0-wrapper --storage-path ~/.amp/mem0
+```
+
+See [python/amp-mem0-wrapper/README.md](python/amp-mem0-wrapper/README.md) for configuration options (local SQLite/Chroma vs. hosted platform).
+
 ### Run the compliance suite against your backend
 
 ```bash
@@ -92,6 +107,7 @@ amp/
 ├── compliance/test_amp_server.py           # 67-test compliance suite (pytest, raw MCP)
 ├── docs/MIGRATING-v1.0-to-v1.1.md          # v1.0→v1.1 migration walkthrough
 ├── examples/minimal_server.py              # Minimal Core-conformant MCP server (v1.0-style — see note below)
+├── python/amp-mem0-wrapper/                # Core-conformant wrapper for Mem0 (local/hosted)
 └── python/amp-server/                      # Full-conformant Python reference impl
     └── src/amp_server/server.py            # smriti-memcore wrapper
 ```
