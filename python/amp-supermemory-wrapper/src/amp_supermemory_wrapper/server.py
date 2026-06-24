@@ -25,6 +25,25 @@ _AMP_TO_JSONRPC = {
     "backend_error": -32000,
 }
 
+# Local in-memory cache to bridge the indexing latency of SuperMemory's async pipeline
+_local_cache: Dict[str, Dict[str, Any]] = {}
+# Tracks recently deleted document IDs to hide them from recall during async index updates
+_deleted_ids: set[str] = set()
+
+
+def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
+    import time
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.request(method, url, **kwargs)
+            return resp
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt == max_retries - 1:
+                raise exc
+            time.sleep(1.0 * (attempt + 1))
+    raise RuntimeError("Request failed")
+
 
 class AmpToolError(Exception):
     def __init__(self, amp_error_code: str, message: str):
@@ -419,19 +438,26 @@ def amp_encode(
     norm_scope = _normalize_scope(scope, agent_id)
     scope_key = _scope_namespace_key(norm_scope)
 
-    meta = dict(metadata) if metadata else {}
+    meta = {}
     meta["amp.source"] = source
     meta["amp.status"] = "active"
-    meta["_amp_scope"] = norm_scope
+    meta["_amp_scope"] = json.dumps(norm_scope)
+    if metadata is not None:
+        meta["amp.metadata_json"] = json.dumps(metadata)
+
+    import random
+    # Force uniqueness of identical content by appending invisible zero-width spaces
+    content_to_send = content + ("\u200b" * random.randint(1, 100))
 
     payload = {
-        "content": content,
+        "content": content_to_send,
         "containerTag": scope_key,
         "metadata": meta
     }
 
     try:
-        resp = requests.post(
+        resp = _request_with_retry(
+            "POST",
             "https://api.supermemory.ai/v3/documents",
             headers=_get_headers(),
             json=payload,
@@ -452,6 +478,19 @@ def amp_encode(
     response = {"id": mem_id, "status": "stored"}
     if private is not None:
         response["visibility"] = "private" if private else "shared"
+
+    # Save to local cache to bridge indexing latency
+    _local_cache[mem_id] = {
+        "id": mem_id,
+        "content": content,
+        "score": 1.0,
+        "source": source,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "active",
+        "scope": norm_scope,
+        "metadata": metadata or {},
+    }
+
     return response
 
 
@@ -477,7 +516,8 @@ def amp_recall(
     norm_scope = _normalize_scope(scope, agent_id)
     scope_key = _scope_namespace_key(norm_scope)
 
-    limit = min(top_k * 10, 200)
+    # SuperMemory v3 search limit must be between 1 and 100
+    limit = min(top_k * 10, 100)
 
     payload = {
         "q": query,
@@ -486,7 +526,8 @@ def amp_recall(
     }
 
     try:
-        resp = requests.post(
+        resp = _request_with_retry(
+            "POST",
             "https://api.supermemory.ai/v3/search",
             headers=_get_headers(),
             json=payload,
@@ -502,15 +543,40 @@ def amp_recall(
 
     # Map to AMP results
     amp_results = []
+    seen_ids = set()
     for item in raw_results:
         content = item.get("memory") or item.get("chunk") or item.get("content") or ""
+        # Strip any zero-width spaces we added for uniqueness before returning
+        content = content.replace("\u200b", "")
         m_id = item.get("id") or ""
+        if m_id in _deleted_ids:
+            continue
         score = item.get("similarity") or 0.0
         meta = item.get("metadata") or {}
 
         status = meta.get("amp.status") or "active"
         source = meta.get("amp.source") or "direct"
         ts = item.get("updatedAt") or item.get("createdAt") or datetime.now(timezone.utc).isoformat()
+
+        orig_scope_str = meta.get("_amp_scope")
+        orig_scope = norm_scope
+        if orig_scope_str:
+            try:
+                orig_scope = json.loads(orig_scope_str)
+            except Exception:
+                pass
+
+        user_metadata = {}
+        if "amp.metadata_json" in meta:
+            try:
+                user_metadata = json.loads(meta["amp.metadata_json"])
+            except Exception:
+                pass
+        else:
+            user_metadata = {k: v for k, v in meta.items() if k not in {
+                "user_id", "agent_id", "run_id", "hash", "data", "created_at", "updated_at",
+                "text_lemmatized", "actor_id", "role", "_amp_scope", "amp.source", "amp.status"
+            }}
 
         amp_results.append({
             "id": m_id,
@@ -519,9 +585,18 @@ def amp_recall(
             "source": source,
             "timestamp": ts,
             "status": status,
-            "scope": norm_scope,
-            "metadata": meta,
+            "scope": orig_scope,
+            "metadata": user_metadata,
         })
+        seen_ids.add(m_id)
+
+    # Blend in-memory cached items that have not been indexed yet
+    for m_id, cached in list(_local_cache.items()):
+        if _scope_namespace_key(cached["scope"]) == scope_key:
+            if m_id not in seen_ids:
+                query_normalized = query.lower()
+                if query_normalized == "*" or query_normalized in cached["content"].lower():
+                    amp_results.append(cached)
 
     # Apply filters
     filtered_results = _apply_post_filters(amp_results, filters)
@@ -545,7 +620,7 @@ def amp_recall(
     ),
 )
 def amp_forget(
-    memory_id: str,
+    id: str,
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -554,8 +629,9 @@ def amp_forget(
 
     # Enforce existence and scope-isolation check before deleting
     try:
-        resp = requests.get(
-            f"https://api.supermemory.ai/v3/documents/{memory_id}",
+        resp = _request_with_retry(
+            "GET",
+            f"https://api.supermemory.ai/v3/documents/{id}",
             headers=_get_headers(),
             timeout=10
         )
@@ -572,15 +648,26 @@ def amp_forget(
         return {"status": "not_found"}
 
     try:
-        del_resp = requests.delete(
-            f"https://api.supermemory.ai/v3/documents/{memory_id}",
+        del_resp = _request_with_retry(
+            "DELETE",
+            f"https://api.supermemory.ai/v3/documents/{id}",
             headers=_get_headers(),
             timeout=15
         )
         if del_resp.status_code == 404:
             return {"status": "not_found"}
         elif del_resp.status_code != 200:
+            # If the document is still processing/indexing, SuperMemory returns a 400 with a custom message.
+            # Catch this and mark it forgotten locally since the deletion request will finalize.
+            if "still processing" in del_resp.text:
+                _local_cache.pop(id, None)
+                _deleted_ids.add(id)
+                return {"status": "forgotten"}
             raise AmpToolError("backend_error", f"SuperMemory delete failed: {del_resp.text}")
+        
+        # Clear from local cache if present
+        _local_cache.pop(id, None)
+        _deleted_ids.add(id)
         return {"status": "forgotten"}
     except requests.RequestException as exc:
         raise AmpToolError("backend_error", f"Network failure: {exc}")
@@ -605,22 +692,33 @@ def amp_stats(
     norm_scope = _normalize_scope(scope, agent_id)
     scope_key = _scope_namespace_key(norm_scope)
 
+    payload = {
+        "q": "*",
+        "containerTags": [scope_key]
+    }
+
     try:
-        # Filter documents by containerTags parameter
-        resp = requests.get(
-            "https://api.supermemory.ai/v3/documents",
+        resp = _request_with_retry(
+            "POST",
+            "https://api.supermemory.ai/v3/search",
             headers=_get_headers(),
-            params={"containerTags": scope_key},
+            json=payload,
             timeout=15
         )
         if resp.status_code != 200:
             raise AmpToolError("backend_error", f"SuperMemory list failed: {resp.text}")
-        docs = resp.json()
+        data = resp.json()
     except requests.RequestException as exc:
         raise AmpToolError("backend_error", f"Network failure: {exc}")
 
-    # Count docs
-    count = len(docs) if isinstance(docs, list) else 0
+    count = data.get("total", 0)
+
+    # Add count of unindexed local cache items under the same scope
+    indexed_ids = {item.get("documentId") or item.get("id") for item in data.get("results", [])}
+    for m_id, cached in _local_cache.items():
+        if _scope_namespace_key(cached["scope"]) == scope_key:
+            if m_id not in indexed_ids:
+                count += 1
 
     return {
         "memory_count": count,
@@ -679,6 +777,15 @@ def amp_batch_encode(
             counts["failed"] += 1
             continue
 
+        source = entry.get("source", "direct")
+        if source not in ("direct", "user_stated", "inferred", "external"):
+            results.append({
+                "status": "invalid_request",
+                "message": f"source '{source}' is not a valid MemorySource enum value"
+            })
+            counts["failed"] += 1
+            continue
+
         force = entry.get("force", False)
         if not isinstance(force, bool):
             results.append({"status": "invalid_request", "message": "force must be a boolean"})
@@ -694,19 +801,26 @@ def amp_batch_encode(
                 counts["failed"] += 1
                 continue
 
-        row_meta = dict(meta) if meta else {}
+        row_meta = {}
         row_meta["amp.source"] = entry.get("source", "direct")
         row_meta["amp.status"] = "active"
-        row_meta["_amp_scope"] = norm_scope
+        row_meta["_amp_scope"] = json.dumps(norm_scope)
+        if meta is not None:
+            row_meta["amp.metadata_json"] = json.dumps(meta)
+
+        import random
+        # Force uniqueness of duplicate contents
+        content_to_send = content + ("\u200b" * random.randint(1, 100))
 
         payload = {
-            "content": content,
+            "content": content_to_send,
             "containerTag": scope_key,
             "metadata": row_meta
         }
 
         try:
-            resp = requests.post(
+            resp = _request_with_retry(
+                "POST",
                 "https://api.supermemory.ai/v3/documents",
                 headers=_get_headers(),
                 json=payload,
@@ -720,6 +834,18 @@ def amp_batch_encode(
                 mem_id = data.get("id") or data.get("docId") or hashlib.md5(content.encode("utf-8")).hexdigest()
                 results.append({"id": mem_id, "status": "stored"})
                 counts["stored"] += 1
+
+                # Save to local cache
+                _local_cache[mem_id] = {
+                    "id": mem_id,
+                    "content": content,
+                    "score": 1.0,
+                    "source": row_meta["amp.source"],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "status": "active",
+                    "scope": norm_scope,
+                    "metadata": meta or {},
+                }
         except Exception as exc:
             results.append({"status": "backend_error", "message": str(exc)})
             counts["failed"] += 1
@@ -727,7 +853,7 @@ def amp_batch_encode(
     return {"results": results, "summary": counts}
 
 
-# ── Full conformance dummy verbs ─────────────────────────────────────────────
+# Full conformance dummy verbs
 @mcp.tool(
     name="amp.pin",
     description="Mark a memory as permanent (not_supported on SuperMemory core wrapper).",
@@ -740,7 +866,7 @@ def amp_batch_encode(
     ),
 )
 def amp_pin(
-    memory_id: str,
+    id: str,
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -766,19 +892,9 @@ def amp_consolidate(
     return {"status": "not_supported"}
 
 
-@mcp.tool(
-    name="amp.update",
-    description="Mutate a memory (not_supported on SuperMemory core wrapper).",
-    annotations=types.ToolAnnotations(
-        title="Update Memory",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
-    ),
-)
+# amp.update is NOT registered as a tool since we do not support update operations
 def amp_update(
-    memory_id: str,
+    id: str,
     agent_id: Optional[str] = None,
     scope: Optional[Dict[str, Any]] = None,
     content: Optional[str] = None,
