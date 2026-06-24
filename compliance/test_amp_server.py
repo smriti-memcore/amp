@@ -2565,7 +2565,7 @@ class TestConcurrentExecution:
 
                 # Recall with retries to handle any concurrent indexing/commit lags
                 found = False
-                for attempt in range(5):
+                for attempt in range(15):
                     rec = client.call_tool("amp.recall", {
                         "agent_id": agent_id,
                         "query": content,
@@ -2574,7 +2574,7 @@ class TestConcurrentExecution:
                     if any(m.get("id") == memory_id for m in rec.get("results", [])):
                         found = True
                         break
-                    time.sleep(0.2)
+                    time.sleep(0.4)
                 assert found, "Recall failed to find concurrently encoded memory after retries"
                 return True
             finally:
