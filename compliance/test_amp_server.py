@@ -2533,6 +2533,19 @@ class TestConcurrentExecution:
 
     def test_concurrent_encodes(self, server_cmd):
         from concurrent.futures import ThreadPoolExecutor
+
+        # Warm-up to initialize DB sequentially and avoid concurrency races on initial file creation
+        client = MCPClient(server_cmd)
+        try:
+            resp = client.call_tool("amp.encode", {
+                "agent_id": "warmup-agent",
+                "content": "warmup content",
+                "force": True,
+            })
+            assert "error" not in resp, resp
+        finally:
+            client.close()
+
         num_threads = 5
         agent_ids = [f"concurrent-agent-{i}-{uuid.uuid4().hex[:4]}" for i in range(num_threads)]
         contents = [f"concurrent content message index {i}" for i in range(num_threads)]

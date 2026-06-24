@@ -8,7 +8,9 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -32,7 +34,6 @@ _deleted_ids: set[str] = set()
 
 
 def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
-    import time
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -451,7 +452,6 @@ def amp_encode(
     if metadata is not None:
         meta["amp.metadata_json"] = json.dumps(metadata)
 
-    import random
     # Force uniqueness of identical content by appending invisible zero-width spaces
     content_to_send = content + ("\u200b" * random.randint(1, 100))
 
@@ -814,7 +814,6 @@ def amp_batch_encode(
         if meta is not None:
             row_meta["amp.metadata_json"] = json.dumps(meta)
 
-        import random
         # Force uniqueness of duplicate contents
         content_to_send = content + ("\u200b" * random.randint(1, 100))
 
